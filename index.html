@@ -22,7 +22,7 @@ input,button{text-transform:uppercase;}
 <script type="text/babel">
 const {useState,useRef,useEffect}=React;
 
-const SCRIPT_URL="https://script.google.com/macros/s/AKfycbxFd7Sj_iZYFeYaIy28IifkES3evUvAO9EzTXDi6w5Kgrjjcj0ABSanFp4cUpTc9ukyZQ/exec";
+const SCRIPT_URL="https://script.google.com/macros/s/AKfycbyLkU-oaFpujlL9WyMosChY8AWfv58yrkjo2FYo9VSLUbXvwiNTRFxr3eFe0cB1dnfEPw/exec";
 
 const COLS=[
   {key:"bunkName",label:"Bunk Name"},
@@ -49,12 +49,13 @@ const mkInv=(name,id)=>({id,name,records:[],closedAt:null});
 const loadState=()=>{try{const r=localStorage.getItem(STORAGE_KEY);return r?JSON.parse(r):null;}catch{return null;}};
 const saveState=(invs,activeId)=>{try{localStorage.setItem(STORAGE_KEY,JSON.stringify({invs,activeId}));}catch{}};
 
-// Send via GET with encoded payload
+// Send via GET with encoded payload — follows redirects for Google Apps Script
 const scriptCall=async(payload)=>{
   const url=SCRIPT_URL+"?payload="+encodeURIComponent(JSON.stringify(payload));
-  const res=await fetch(url);
+  const res=await fetch(url,{redirect:"follow"});
   if(!res.ok)throw new Error("HTTP "+res.status);
-  return res.json();
+  const text=await res.text();
+  try{return JSON.parse(text);}catch(e){throw new Error("Bad response: "+text.slice(0,120));}
 };
 
 function App(){
@@ -207,11 +208,13 @@ function App(){
     else{
       upd(r=>[...r,rec]);
       try{
+        const sheetName=active?.name||"Sheet1";
         const header=COLS.map(c=>c.label.toUpperCase());
         const row=COLS.map(c=>String(rec[c.key]||""));
-        await scriptCall({action:"append",sheetName:active?.name||"Sheet1",header,rows:[row]});
-        showToast("Added + Synced!");
-      }catch{showToast("Added (sync failed)","error");}
+        const json=await scriptCall({action:"append",sheetName,header,rows:[row]});
+        if(json.ok){showToast("Added + Synced ✓");}
+        else{showToast("Added (sync error: "+(json.error||"?")+")", "error");}
+      }catch(e){showToast("Added (sync failed: "+e.message+")","error");}
     }
     setShowForm(false);setEditId(null);
   };
@@ -225,11 +228,17 @@ function App(){
     setShowClose(false);showToast("CMS Closed!");
   };
 
-  const newInv=()=>{
+  const newInv=async()=>{
     const n=newName.trim()||`CMS ${invs.length+1}`;
     const id=Date.now();
     setInvs(p=>[...p,mkInv(n,id)]);
-    setActiveId(id);setNewName("");setShowNew(false);setView("active");setSearch("");showToast(`"${n}" Started!`);
+    setActiveId(id);setNewName("");setShowNew(false);setView("active");setSearch("");
+    showToast(`"${n}" Started!`);
+    // Auto-create the sheet tab in Google Sheets immediately
+    try{
+      const header=COLS.map(c=>c.label.toUpperCase());
+      await scriptCall({action:"push",sheetName:n,rows:[header]});
+    }catch(e){/* silent — sheet will be created on first push */}
   };
 
   const download=(recs,name)=>{
