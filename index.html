@@ -42,12 +42,26 @@ const COLS=[
   {key:"receivedByGPay",label:"Received By G Pay"},
 ];
 
+const STORAGE_KEY = "trainee_cms_data_v1";
 const EMPTY=()=>Object.fromEntries(COLS.map(c=>[c.key,""]));
 const mkInv=(name,id)=>({id,name,records:[],closedAt:null});
 
+// ── Persist to localStorage ────────────────────────────────────────
+const loadState = () => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch { return null; }
+};
+
+const saveState = (invs, activeId) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ invs, activeId }));
+  } catch {}
+};
+
 // ── Send data to Apps Script via GET with encoded payload ──────────
-// POST body is blocked by no-cors, so we encode data as a GET param.
-// Apps Script doGet reads e.parameter.payload and writes to sheet.
 const scriptCall=async(payload)=>{
   const url=SCRIPT_URL+"?payload="+encodeURIComponent(JSON.stringify(payload));
   const res=await fetch(url);
@@ -56,8 +70,13 @@ const scriptCall=async(payload)=>{
 };
 
 function App(){
-  const [invs,setInvs]=useState(()=>[mkInv("CMS 1",1)]);
-  const [activeId,setActiveId]=useState(1);
+  // ── Load from localStorage on first render ─────────────────────
+  const stored = loadState();
+  const initialInvs = stored?.invs || [mkInv("CMS 1",1)];
+  const initialActiveId = stored?.activeId || 1;
+
+  const [invs,setInvs]=useState(initialInvs);
+  const [activeId,setActiveId]=useState(initialActiveId);
   const [search,setSearch]=useState("");
   const [editId,setEditId]=useState(null);
   const [form,setForm]=useState(EMPTY);
@@ -73,6 +92,11 @@ function App(){
   const [status,setStatus]=useState(null);
   const [showSheets,setShowSheets]=useState(false);
   const tRef=useRef();
+
+  // ── Auto-save to localStorage whenever invs or activeId changes ──
+  useEffect(()=>{
+    saveState(invs, activeId);
+  },[invs, activeId]);
 
   const showToast=(msg,type="success")=>{
     setToast({msg,type});
