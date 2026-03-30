@@ -10,19 +10,23 @@
 <style>
 *{box-sizing:border-box;margin:0;padding:0;text-transform:uppercase;}
 body{font-family:Inter,sans-serif;background:#eef2ff;padding:12px;}
-input,button{text-transform:uppercase;}
+input,button,select{text-transform:uppercase;}
 ::-webkit-scrollbar{height:6px;width:6px;}
 ::-webkit-scrollbar-thumb{background:#a5b4fc;border-radius:4px;}
 .spin{display:inline-block;animation:spin .8s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+.fade-in{animation:fadeIn .18s ease}
+.inline-input{width:100%;padding:3px 5px;border:1.5px solid #6366f1;border-radius:4px;font-size:11px;outline:none;background:#fff;font-family:Inter,sans-serif;text-transform:uppercase;}
 </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const {useState,useRef,useEffect}=React;
+const {useState,useRef,useEffect,useMemo}=React;
 
 const SCRIPT_URL="https://script.google.com/macros/s/AKfycbyLkU-oaFpujlL9WyMosChY8AWfv58yrkjo2FYo9VSLUbXvwiNTRFxr3eFe0cB1dnfEPw/exec";
+const SERVICE_CHARGE_RATE=165;
 
 const COLS=[
   {key:"bunkName",label:"Bunk Name"},
@@ -41,15 +45,14 @@ const COLS=[
   {key:"receivedByCash",label:"Received By Cash"},
   {key:"receivedByGPay",label:"Received By G Pay"},
 ];
-
-const STORAGE_KEY="trainee_cms_v2";
+const NUM_COLS=COLS.filter(c=>c.type==="number").map(c=>c.key);
+const STORAGE_KEY="trainee_cms_v3";
 const EMPTY=()=>Object.fromEntries(COLS.map(c=>[c.key,""]));
-const mkInv=(name,id)=>({id,name,records:[],closedAt:null});
-
+const mkInv=(name,id)=>({id,name,records:[],closedAt:null,createdAt:new Date().toLocaleString()});
 const loadState=()=>{try{const r=localStorage.getItem(STORAGE_KEY);return r?JSON.parse(r):null;}catch{return null;}};
 const saveState=(invs,activeId)=>{try{localStorage.setItem(STORAGE_KEY,JSON.stringify({invs,activeId}));}catch{}};
-
-// Send via GET with encoded payload — follows redirects for Google Apps Script
+let _uid=Date.now();
+const uid=()=>String(++_uid);
 const scriptCall=async(payload)=>{
   const url=SCRIPT_URL+"?payload="+encodeURIComponent(JSON.stringify(payload));
   const res=await fetch(url,{redirect:"follow"});
@@ -57,15 +60,132 @@ const scriptCall=async(payload)=>{
   const text=await res.text();
   try{return JSON.parse(text);}catch(e){throw new Error("Bad response: "+text.slice(0,120));}
 };
+const toCSV=(recs)=>{
+  const esc=v=>'"'+String(v||"").replace(/"/g,'""')+'"';
+  return [COLS.map(c=>esc(c.label)).join(","),...recs.map(r=>COLS.map(c=>esc(r[c.key]||"")).join(","))].join("\n");
+};
 
+// ── Inline Cell Editor ─────────────────────────────────────────
+function InlineCell({rec,col,onSave}){
+  const [editing,setEditing]=useState(false);
+  const [val,setVal]=useState(rec[col.key]||"");
+  const inRef=useRef();
+  useEffect(()=>{if(editing&&inRef.current)inRef.current.focus();},[editing]);
+  const commit=()=>{
+    onSave(col.key,col.type==="number"||col.type==="date"?val:val.toUpperCase());
+    if(col.key==="policyCount"){
+      const sc=Math.round((parseFloat(val)||0)*SERVICE_CHARGE_RATE);
+      onSave("serviceCharge",String(sc));
+    }
+    setEditing(false);
+  };
+  if(editing){
+    return <input ref={inRef} className="inline-input"
+      type={col.type==="number"?"number":col.type==="date"?"date":"text"}
+      value={val} onChange={e=>setVal(e.target.value)}
+      onBlur={commit}
+      onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){setEditing(false);setVal(rec[col.key]||"");}}}/>;
+  }
+  const disp=col.type==="number"&&rec[col.key]&&!isNaN(parseFloat(rec[col.key]))?`₹${parseFloat(rec[col.key]).toLocaleString()}`:(rec[col.key]||"—");
+  return <span onClick={()=>{setVal(rec[col.key]||"");setEditing(true);}} title="Click to edit"
+    style={{cursor:"text",display:"block",minWidth:40,paddingBottom:1,borderBottom:"1px dashed transparent",transition:"border-color .15s"}}
+    onMouseEnter={e=>e.currentTarget.style.borderBottomColor="#a5b4fc"}
+    onMouseLeave={e=>e.currentTarget.style.borderBottomColor="transparent"}>{disp}</span>;
+}
+
+// ── Per-Bunk Summary ──────────────────────────────────────────
+function BunkSummary({records}){
+  const [open,setOpen]=useState(false);
+  const [openBunks,setOpenBunks]=useState(new Set());
+  const bunkMap=useMemo(()=>{
+    const m=new Map();
+    records.forEach(r=>{
+      const b=r.bunkName||"(NO BUNK)";
+      if(!m.has(b))m.set(b,{records:[],totals:{}});
+      m.get(b).records.push(r);
+    });
+    m.forEach(v=>{NUM_COLS.forEach(k=>{v.totals[k]=v.records.reduce((s,r)=>s+(parseFloat(r[k])||0),0);});});
+    return m;
+  },[records]);
+  if(!records.length)return null;
+  const toggleBunk=b=>setOpenBunks(s=>{const n=new Set(s);n.has(b)?n.delete(b):n.add(b);return n;});
+  const TH2={padding:"6px 10px",textAlign:"left",color:"#4338ca",fontWeight:700,borderBottom:"1.5px solid #c7d2fe",fontSize:11,whiteSpace:"nowrap"};
+  const TD2={padding:"5px 10px",fontSize:11};
+  return(
+    <div style={{background:"#fff",border:"2px solid #818cf8",borderRadius:12,marginBottom:14,overflow:"hidden"}}>
+      <button onClick={()=>setOpen(o=>!o)} style={{width:"100%",padding:"10px 16px",background:"#eef2ff",border:"none",borderBottom:open?"2px solid #c7d2fe":"none",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",fontWeight:800,fontSize:13,color:"#3730a3"}}>
+        <span>🏦 PER-BUNK SUMMARY ({bunkMap.size} BUNK{bunkMap.size!==1?"S":""})</span>
+        <span>{open?"▲":"▼"}</span>
+      </button>
+      {open&&(
+        <div style={{padding:12,display:"flex",flexDirection:"column",gap:8}}>
+          {[...bunkMap.entries()].map(([bunk,{records:br,totals:bt}])=>(
+            <div key={bunk} style={{border:"1.5px solid #c7d2fe",borderRadius:10,overflow:"hidden"}}>
+              <button onClick={()=>toggleBunk(bunk)} style={{width:"100%",padding:"8px 12px",background:"#f5f7ff",border:"none",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",fontWeight:700,fontSize:12,color:"#4338ca",flexWrap:"wrap",gap:6}}>
+                <span>📂 {bunk} — {br.length} TRAINEE{br.length!==1?"S":""}</span>
+                <div style={{display:"flex",gap:12,fontSize:11,color:"#6366f1",alignItems:"center",flexWrap:"wrap"}}>
+                  <span>📋 POLICY: {(bt.policyCount||0).toLocaleString()}</span>
+                  <span>💵 CASH: ₹{(bt.cash||0).toLocaleString()}</span>
+                  <span>📱 GPAY: ₹{(bt.gPay||0).toLocaleString()}</span>
+                  <span style={{color:(bt.pendingAmount||0)>0?"#f59e0b":"#10b981",fontWeight:700}}>⏳ PENDING: ₹{(bt.pendingAmount||0).toLocaleString()}</span>
+                  <span>{openBunks.has(bunk)?"▲":"▼"}</span>
+                </div>
+              </button>
+              {openBunks.has(bunk)&&(
+                <div style={{overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",minWidth:600}}>
+                    <thead>
+                      <tr style={{background:"#eef2ff"}}>
+                        <th style={TH2}>#</th>
+                        <th style={TH2}>TRAINEE NAME</th>
+                        {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount"].map(k=>(
+                          <th key={k} style={TH2}>{COLS.find(c=>c.key===k)?.label}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {br.map((r,i)=>(
+                        <tr key={r.id} style={{background:i%2===0?"#fff":"#f8f9ff"}}>
+                          <td style={{...TD2,fontWeight:700,color:"#6366f1"}}>{i+1}</td>
+                          <td style={{...TD2,color:"#374151",fontWeight:600}}>{r.traineeName||"—"}</td>
+                          {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount"].map(k=>(
+                            <td key={k} style={{...TD2,fontWeight:600,
+                              color:(k==="pendingAmount"&&(parseFloat(r[k])||0)>0)?"#d97706":"#1d4ed8",
+                              background:(k==="pendingAmount"&&(parseFloat(r[k])||0)>0)?"#fef9c3":"inherit"}}>
+                              {r[k]&&!isNaN(parseFloat(r[k]))?`₹${parseFloat(r[k]).toLocaleString()}`:(r[k]||"—")}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                      <tr style={{background:"#ede9fe",fontWeight:700,borderTop:"1.5px solid #818cf8"}}>
+                        <td style={TD2} colSpan={2}>TOTAL</td>
+                        {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount"].map(k=>(
+                          <td key={k} style={{...TD2,color:"#5b21b6"}}>₹{(bt[k]||0).toLocaleString()}</td>
+                        ))}
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────
 function App(){
   const stored=loadState();
-  const [invs,setInvs]=useState(stored?.invs||[mkInv("CMS 1",1)]);
-  const [activeId,setActiveId]=useState(stored?.activeId||1);
+  const [invs,setInvs]=useState(stored?.invs||[mkInv("CMS 1",uid())]);
+  const [activeId,setActiveId]=useState(stored?.activeId||(stored?.invs?.[0]?.id||null));
   const [search,setSearch]=useState("");
+  const [histSearch,setHistSearch]=useState("");
   const [editId,setEditId]=useState(null);
   const [form,setForm]=useState(EMPTY);
   const [showForm,setShowForm]=useState(false);
+  const [dupWarn,setDupWarn]=useState(null);
   const [delId,setDelId]=useState(null);
   const [toast,setToast]=useState(null);
   const [showClose,setShowClose]=useState(false);
@@ -75,55 +195,145 @@ function App(){
   const [histId,setHistId]=useState(null);
   const [syncing,setSyncing]=useState(false);
   const [status,setStatus]=useState(null);
-  const tRef=useRef();
+  const [sortKey,setSortKey]=useState(null);
+  const [sortDir,setSortDir]=useState("asc");
+  const [selected,setSelected]=useState(new Set());
+  const [showBulkDel,setShowBulkDel]=useState(false);
+  const [undoStack,setUndoStack]=useState(null);
+  const [renameId,setRenameId]=useState(null);
+  const [renameName,setRenameName]=useState("");
+  // NEW: date range filter
+  const [dateFrom,setDateFrom]=useState("");
+  const [dateTo,setDateTo]=useState("");
 
+  const tRef=useRef();const undoRef=useRef();
   useEffect(()=>{saveState(invs,activeId);},[invs,activeId]);
-  useEffect(()=>()=>clearTimeout(tRef.current),[]);
+  useEffect(()=>()=>{clearTimeout(tRef.current);clearTimeout(undoRef.current);},[]);
 
-  const showToast=(msg,type="success")=>{
-    setToast({msg,type});clearTimeout(tRef.current);
-    tRef.current=setTimeout(()=>setToast(null),2800);
-  };
+  const showToast=(msg,type="success")=>{setToast({msg,type});clearTimeout(tRef.current);tRef.current=setTimeout(()=>setToast(null),2800);};
 
-  const active=invs.find(i=>i.id===activeId);
+  const isHist=view==="history";
+  const active=invs.find(i=>i.id===activeId)||invs.find(i=>!i.closedAt)||null;
   const closed=invs.filter(i=>i.closedAt!==null);
   const histInv=invs.find(i=>i.id===histId);
-  const isHist=view==="history";
-  const records=active?.records||[];
-  const filtered=records.filter(r=>COLS.some(c=>String(r[c.key]||"").toLowerCase().includes(search.toLowerCase())));
-  const display=isHist&&histInv?histInv.records:filtered;
   const currentInv=isHist?histInv:active;
+  const records=active?.records||[];
+  const currentSearch=isHist?histSearch:search;
+  const baseDisplay=isHist?(histInv?.records||[]):records;
 
-  const totals=(recs)=>{const t={};COLS.filter(c=>c.type==="number").forEach(c=>{t[c.key]=recs.reduce((s,r)=>s+(parseFloat(r[c.key])||0),0);});return t;};
-  const dt=totals(display);
+  const searched=useMemo(()=>{
+    if(!currentSearch)return baseDisplay;
+    const q=currentSearch.toLowerCase();
+    return baseDisplay.filter(r=>COLS.some(c=>String(r[c.key]||"").toLowerCase().includes(q)));
+  },[baseDisplay,currentSearch]);
+
+  // NEW: date range filter applied after search
+  const dateFiltered=useMemo(()=>{
+    if(!dateFrom&&!dateTo)return searched;
+    return searched.filter(r=>{
+      const rf=r.fromDate,rt=r.toDate;
+      if(!rf&&!rt)return false;
+      const recFrom=new Date(rf||rt),recTo=new Date(rt||rf);
+      if(dateFrom&&recTo<new Date(dateFrom))return false;
+      if(dateTo&&recFrom>new Date(dateTo))return false;
+      return true;
+    });
+  },[searched,dateFrom,dateTo]);
+
+  const display=useMemo(()=>{
+    if(!sortKey)return dateFiltered;
+    return [...dateFiltered].sort((a,b)=>{
+      let av=a[sortKey]||"",bv=b[sortKey]||"";
+      const col=COLS.find(c=>c.key===sortKey);
+      if(col?.type==="number"){av=parseFloat(av)||0;bv=parseFloat(bv)||0;}
+      if(col?.type==="date"){av=av?new Date(av):new Date(0);bv=bv?new Date(bv):new Date(0);}
+      if(av<bv)return sortDir==="asc"?-1:1;
+      if(av>bv)return sortDir==="asc"?1:-1;
+      return 0;
+    });
+  },[dateFiltered,sortKey,sortDir]);
+
+  const totals=useMemo(()=>{const t={};NUM_COLS.forEach(k=>{t[k]=display.reduce((s,r)=>s+(parseFloat(r[k])||0),0);});return t;},[display]);
 
   const upd=(fn)=>setInvs(p=>p.map(i=>i.id===activeId?{...i,records:fn(i.records)}:i));
-  const updFor=(id,fn)=>setInvs(p=>p.map(i=>i.id===id?{...i,records:fn(i.records)}:i));
+  const toggleSort=(key)=>{if(sortKey===key){setSortDir(d=>d==="asc"?"desc":"asc");}else{setSortKey(key);setSortDir("asc");}};
+
+  // NEW: check duplicate trainee name in this CMS
+  const checkDup=(name,excludeId=null)=>!!name&&records.some(r=>r.id!==excludeId&&r.traineeName.toUpperCase()===name.trim().toUpperCase());
+
+  // NEW: form field change with auto-service-charge + duplicate check
+  const handleFormChange=(key,value)=>{
+    setForm(f=>{
+      const next={...f,[key]:value};
+      if(key==="policyCount"){
+        const pc=parseFloat(value)||0;
+        next.serviceCharge=pc>0?String(Math.round(pc*SERVICE_CHARGE_RATE)):"";
+      }
+      return next;
+    });
+    if(key==="traineeName"){
+      setDupWarn(checkDup(value,editId)?`⚠ "${value.toUpperCase()}" ALREADY EXISTS IN THIS CMS!`:null);
+    }
+  };
+
+  // NEW: inline cell save with auto service charge
+  const inlineSave=(recId,key,value)=>{
+    setInvs(p=>p.map(i=>{
+      if(i.id!==activeId)return i;
+      return {...i,records:i.records.map(r=>{
+        if(r.id!==recId)return r;
+        const updr={...r,[key]:value};
+        if(key==="policyCount"){
+          const pc=parseFloat(value)||0;
+          updr.serviceCharge=pc>0?String(Math.round(pc*SERVICE_CHARGE_RATE)):"";
+        }
+        return updr;
+      })};
+    }));
+  };
 
   const save=()=>{
     if(!form.bunkName||!form.traineeName){showToast("Bunk Name & Trainee Name required","error");return;}
+    if(editId===null&&checkDup(form.traineeName))showToast(`⚠ DUPLICATE: ${form.traineeName} already exists!`,"error");
     if(editId!==null){upd(r=>r.map(x=>x.id===editId?{...form,id:editId}:x));showToast("Updated!");}
-    else{upd(r=>[...r,{...form,id:Date.now()}]);showToast("Added!");}
-    setShowForm(false);setEditId(null);
+    else{upd(r=>[...r,{...form,id:uid()}]);showToast("Added!");}
+    setShowForm(false);setEditId(null);setForm(EMPTY());setDupWarn(null);
   };
 
-  // Push current CMS records to its own sheet tab
+  const saveSync=async()=>{
+    if(!form.bunkName||!form.traineeName){showToast("Bunk Name & Trainee Name required","error");return;}
+    if(editId===null&&checkDup(form.traineeName))showToast(`⚠ DUPLICATE: ${form.traineeName} already exists!`,"error");
+    const rec={...form,id:editId!==null?editId:uid()};
+    if(editId!==null){upd(r=>r.map(x=>x.id===editId?rec:x));}else{upd(r=>[...r,rec]);}
+    setShowForm(false);setEditId(null);setForm(EMPTY());setDupWarn(null);
+    try{
+      const sheetName=active?.name||"Sheet1";
+      const header=COLS.map(c=>c.label.toUpperCase());
+      if(editId!==null){
+        const allRecs=active?active.records.map(x=>x.id===editId?rec:x):[];
+        const json=await scriptCall({action:"push",sheetName,rows:[header,...allRecs.map(r=>COLS.map(c=>String(r[c.key]||"")))]});
+        if(json.ok){showToast("Updated + Synced ✓");}else{showToast("Updated (sync error)","error");}
+      } else {
+        const json=await scriptCall({action:"append",sheetName,header,rows:[COLS.map(c=>String(rec[c.key]||""))]});
+        if(json.ok){showToast("Added + Synced ✓");}else{showToast("Added (sync error)","error");}
+      }
+    }catch(e){showToast("Saved (sync failed: "+e.message+")","error");}
+  };
+
   const push=async()=>{
-    const recs=display;
-    if(!recs.length){setStatus({msg:"No records to push",ok:false});return;}
+    if(!display.length){setStatus({msg:"No records to push",ok:false});return;}
     if(!currentInv){setStatus({msg:"No active CMS",ok:false});return;}
     setSyncing(true);setStatus(null);
     try{
       const header=COLS.map(c=>c.label.toUpperCase());
-      const rows=recs.map(r=>COLS.map(c=>String(r[c.key]||"")));
+      const rows=display.map(r=>COLS.map(c=>String(r[c.key]||"")));
       const json=await scriptCall({action:"push",sheetName:currentInv.name,rows:[header,...rows]});
-      if(json.ok){setStatus({msg:`✓ ${recs.length} records pushed to sheet "${currentInv.name}"!`,ok:true});showToast("Pushed to Sheets!");}
-      else{setStatus({msg:"Error: "+(json.error||"Unknown"),ok:false});}
+      if(json.ok){setStatus({msg:`✓ ${display.length} records pushed to "${currentInv.name}"!`,ok:true});showToast("Pushed to Sheets!");}
+      else setStatus({msg:"Error: "+(json.error||"Unknown"),ok:false});
     }catch(e){setStatus({msg:"Push failed: "+e.message,ok:false});}
     setSyncing(false);
   };
 
-  // Push ALL CMS (active + closed) each to their own sheet tab
   const pushAll=async()=>{
     setSyncing(true);setStatus(null);
     try{
@@ -131,135 +341,149 @@ function App(){
       for(const inv of invs){
         if(!inv.records.length)continue;
         const header=COLS.map(c=>c.label.toUpperCase());
-        const rows=inv.records.map(r=>COLS.map(c=>String(r[c.key]||"")));
-        await scriptCall({action:"push",sheetName:inv.name,rows:[header,...rows]});
+        await scriptCall({action:"push",sheetName:inv.name,rows:[header,...inv.records.map(r=>COLS.map(c=>String(r[c.key]||"")))]});
         count++;
       }
-      setStatus({msg:`✓ All ${count} CMS pushed to Google Sheets!`,ok:true});
-      showToast("All CMS pushed!");
+      setStatus({msg:`✓ All ${count} CMS pushed!`,ok:true});showToast("All CMS pushed!");
     }catch(e){setStatus({msg:"Push all failed: "+e.message,ok:false});}
     setSyncing(false);
   };
 
-  // Pull from sheet tab matching current CMS name
   const pull=async()=>{
-    if(!currentInv){setStatus({msg:"No active CMS to pull into",ok:false});return;}
+    if(!currentInv){setStatus({msg:"No active CMS",ok:false});return;}
     setSyncing(true);setStatus(null);
     try{
       const json=await scriptCall({action:"get",sheetName:currentInv.name});
-      if(!json.ok)throw new Error(json.error||"Unknown error");
+      if(!json.ok)throw new Error(json.error||"Unknown");
       const rows=json.rows||[];
-      if(rows.length<2){setStatus({msg:`No data in sheet "${currentInv.name}"`,ok:false});setSyncing(false);return;}
+      if(rows.length<2){setStatus({msg:`No data in "${currentInv.name}"`,ok:false});setSyncing(false);return;}
       const header=rows[0].map(h=>String(h).toLowerCase().replace(/\s+/g,""));
       const colMap=COLS.map(c=>header.findIndex(h=>h===c.key.toLowerCase()||h===c.label.toLowerCase().replace(/\s+/g,"")));
-      const imported=rows.slice(1).map((row,i)=>{
-        const rec={id:Date.now()+i};
-        COLS.forEach((c,ci)=>{rec[c.key]=colMap[ci]>=0?String(row[colMap[ci]]||""):"";});
-        return rec;
-      }).filter(r=>r.bunkName||r.traineeName);
-      // Pull into whichever CMS is currently viewed (active or history)
+      const imported=rows.slice(1).map(row=>{const rec={id:uid()};COLS.forEach((c,ci)=>{rec[c.key]=colMap[ci]>=0?String(row[colMap[ci]]||""):"";});return rec;}).filter(r=>r.bunkName||r.traineeName);
       setInvs(p=>p.map(i=>i.id===currentInv.id?{...i,records:imported}:i));
-      setStatus({msg:`✓ ${imported.length} records pulled from sheet "${currentInv.name}"!`,ok:true});
-      showToast("Pulled from Sheets!");
+      setStatus({msg:`✓ ${imported.length} records pulled!`,ok:true});showToast("Pulled!");
     }catch(e){setStatus({msg:"Pull failed: "+e.message,ok:false});}
     setSyncing(false);
   };
 
-  // Pull ALL sheets and match/create CMS entries
   const pullAll=async()=>{
     setSyncing(true);setStatus(null);
     try{
       const json=await scriptCall({action:"getAll"});
-      if(!json.ok)throw new Error(json.error||"Unknown error");
+      if(!json.ok)throw new Error(json.error||"Unknown");
       const sheetsData=json.sheets||{};
-      let totalImported=0;
+      let total=0;
       setInvs(prev=>{
         let updated=[...prev];
         for(const [sheetName,rows] of Object.entries(sheetsData)){
           if(!rows||rows.length<2)continue;
           const header=rows[0].map(h=>String(h).toLowerCase().replace(/\s+/g,""));
           const colMap=COLS.map(c=>header.findIndex(h=>h===c.key.toLowerCase()||h===c.label.toLowerCase().replace(/\s+/g,"")));
-          const imported=rows.slice(1).map((row,i)=>{
-            const rec={id:Date.now()+i+Math.random()};
-            COLS.forEach((c,ci)=>{rec[c.key]=colMap[ci]>=0?String(row[colMap[ci]]||""):"";});
-            return rec;
-          }).filter(r=>r.bunkName||r.traineeName);
-          totalImported+=imported.length;
-          const existing=updated.find(i=>i.name.toUpperCase()===sheetName.toUpperCase());
-          if(existing){
-            updated=updated.map(i=>i.name.toUpperCase()===sheetName.toUpperCase()?{...i,records:imported}:i);
-          } else {
-            const newId=Date.now()+Math.random();
-            updated=[...updated,{id:newId,name:sheetName,records:imported,closedAt:null}];
-          }
+          const imported=rows.slice(1).map(row=>{const rec={id:uid()};COLS.forEach((c,ci)=>{rec[c.key]=colMap[ci]>=0?String(row[colMap[ci]]||""):"";});return rec;}).filter(r=>r.bunkName||r.traineeName);
+          total+=imported.length;
+          const ex=updated.find(i=>i.name.toUpperCase()===sheetName.toUpperCase());
+          if(ex){updated=updated.map(i=>i.name.toUpperCase()===sheetName.toUpperCase()?{...i,records:imported}:i);}
+          else{updated=[...updated,{id:uid(),name:sheetName,records:imported,closedAt:null,createdAt:new Date().toLocaleString()}];}
         }
         return updated;
       });
-      setStatus({msg:`✓ Pulled all sheets: ${totalImported} total records!`,ok:true});
-      showToast("All sheets pulled!");
+      setStatus({msg:`✓ Pulled all: ${total} records!`,ok:true});showToast("All pulled!");
     }catch(e){setStatus({msg:"Pull all failed: "+e.message,ok:false});}
     setSyncing(false);
   };
 
-  const saveSync=async()=>{
-    if(!form.bunkName||!form.traineeName){showToast("Bunk Name & Trainee Name required","error");return;}
-    const rec={...form,id:editId!==null?editId:Date.now()};
-    if(editId!==null){upd(r=>r.map(x=>x.id===editId?rec:x));showToast("Updated!");}
-    else{
-      upd(r=>[...r,rec]);
-      try{
-        const sheetName=active?.name||"Sheet1";
-        const header=COLS.map(c=>c.label.toUpperCase());
-        const row=COLS.map(c=>String(rec[c.key]||""));
-        const json=await scriptCall({action:"append",sheetName,header,rows:[row]});
-        if(json.ok){showToast("Added + Synced ✓");}
-        else{showToast("Added (sync error: "+(json.error||"?")+")", "error");}
-      }catch(e){showToast("Added (sync failed: "+e.message+")","error");}
-    }
-    setShowForm(false);setEditId(null);
-  };
-
   const closeInv=()=>{
-    setInvs(p=>p.map(i=>i.id===activeId?{...i,closedAt:new Date().toLocaleString()}:i));
-    // Switch to first open CMS if exists, else stay on history
+    const closedAt=new Date().toLocaleString();
+    setInvs(p=>p.map(i=>i.id===activeId?{...i,closedAt}:i));
     const remaining=invs.filter(i=>i.id!==activeId&&!i.closedAt);
     if(remaining.length){setActiveId(remaining[0].id);setView("active");}
-    else{setView("history");setHistId(activeId);}
-    setShowClose(false);showToast("CMS Closed!");
+    else{setHistId(activeId);setView("history");}
+    setShowClose(false);showToast("CMS Closed!");setSelected(new Set());
   };
 
   const newInv=async()=>{
-    const n=newName.trim()||`CMS ${invs.length+1}`;
-    const id=Date.now();
+    const n=(newName.trim()||`CMS ${invs.length+1}`).toUpperCase();
+    if(invs.some(i=>i.name.toUpperCase()===n)){showToast(`"${n}" already exists!`,"error");return;}
+    const id=uid();
     setInvs(p=>[...p,mkInv(n,id)]);
-    setActiveId(id);setNewName("");setShowNew(false);setView("active");setSearch("");
+    setActiveId(id);setNewName("");setShowNew(false);setView("active");
+    setSearch("");setStatus(null);setSelected(new Set());setSortKey(null);setDateFrom("");setDateTo("");
     showToast(`"${n}" Started!`);
-    // Auto-create the sheet tab in Google Sheets immediately
-    try{
-      const header=COLS.map(c=>c.label.toUpperCase());
-      await scriptCall({action:"push",sheetName:n,rows:[header]});
-    }catch(e){/* silent — sheet will be created on first push */}
+    try{await scriptCall({action:"push",sheetName:n,rows:[COLS.map(c=>c.label.toUpperCase())]});}catch(e){}
   };
 
-  const download=(recs,name)=>{
-    if(!recs||!recs.length){showToast("No records to download","error");return;}
+  const doRename=()=>{
+    const n=renameName.trim().toUpperCase();
+    if(!n){showToast("Name cannot be empty","error");return;}
+    if(invs.some(i=>i.id!==renameId&&i.name.toUpperCase()===n)){showToast(`"${n}" already exists!`,"error");return;}
+    setInvs(p=>p.map(i=>i.id===renameId?{...i,name:n}:i));
+    setRenameId(null);setRenameName("");showToast("Renamed!");
+  };
+
+  const deleteRecord=(id)=>{
+    const rec=records.find(r=>r.id===id);
+    setUndoStack({records:[rec],invId:activeId});
+    upd(r=>r.filter(x=>x.id!==id));setDelId(null);
+    showToast("Deleted! (UNDO available)","error");
+    clearTimeout(undoRef.current);undoRef.current=setTimeout(()=>setUndoStack(null),8000);
+  };
+
+  const doBulkDelete=()=>{
+    const toDelete=[...selected];
+    setUndoStack({records:records.filter(r=>toDelete.includes(r.id)),invId:activeId});
+    upd(r=>r.filter(x=>!toDelete.includes(x.id)));
+    setSelected(new Set());setShowBulkDel(false);
+    showToast(`${toDelete.length} deleted! (UNDO available)`,"error");
+    clearTimeout(undoRef.current);undoRef.current=setTimeout(()=>setUndoStack(null),8000);
+  };
+
+  const doUndo=()=>{
+    if(!undoStack)return;
+    setInvs(p=>p.map(i=>i.id===undoStack.invId?{...i,records:[...i.records,...undoStack.records]}:i));
+    setUndoStack(null);clearTimeout(undoRef.current);showToast("Restored!");
+  };
+
+  const toggleSelect=(id)=>setSelected(s=>{const n=new Set(s);n.has(id)?n.delete(id):n.add(id);return n;});
+  const selectAll=()=>setSelected(s=>s.size===display.length?new Set():new Set(display.map(r=>r.id)));
+
+  const download=(recs,name,fmt="xls")=>{
+    if(!recs?.length){showToast("No records","error");return;}
+    if(fmt==="csv"){const a=document.createElement("a");a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(toCSV(recs));a.download=`${name||"cms"}.csv`;a.click();showToast("CSV Downloaded!");return;}
     const esc=v=>String(v||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
     const hRow=COLS.map(c=>`<Cell ss:StyleID="h"><Data ss:Type="String">${esc(c.label.toUpperCase())}</Data></Cell>`).join("");
-    const dRows=recs.map(r=>"<Row>"+COLS.map(c=>{const v=r[c.key]||"";const t=c.type==="number"&&v!==""?"Number":"String";return`<Cell><Data ss:Type="${t}">${esc(t==="Number"?parseFloat(v)||0:v)}</Data></Cell>`;}).join("")+"</Row>").join("");
+    const dRows=recs.map(r=>"<Row>"+COLS.map(c=>{const v=r[c.key]||"";const t=c.type==="number"&&v?"Number":"String";return`<Cell><Data ss:Type="${t}">${esc(t==="Number"?parseFloat(v)||0:v)}</Data></Cell>`;}).join("")+"</Row>").join("");
     const xml=`<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Styles><Style ss:ID="h"><Font ss:Bold="1"/><Interior ss:Color="#C7D2FE" ss:Pattern="Solid"/></Style></Styles><Worksheet ss:Name="CMS"><Table><Row>${hRow}</Row>${dRows}</Table></Worksheet></Workbook>`;
-    const a=document.createElement("a");
-    a.href="data:application/vnd.ms-excel;charset=utf-8,"+encodeURIComponent(xml);
-    a.download=`${name||"cms"}.xls`;a.click();showToast("Downloaded!");
+    const a=document.createElement("a");a.href="data:application/vnd.ms-excel;charset=utf-8,"+encodeURIComponent(xml);a.download=`${name||"cms"}.xls`;a.click();showToast("Downloaded!");
   };
 
+  const duplicateRecord=(rec)=>{upd(r=>[...r,{...rec,id:uid()}]);showToast("Duplicated!");};
+
+  const stats=useMemo(()=>{
+    const n=display.length;if(!n)return null;
+    const avgPolicy=(display.reduce((s,x)=>s+(parseFloat(x.policyCount)||0),0)/n).toFixed(1);
+    const topBunk=[...display.reduce((m,x)=>{m.set(x.bunkName||"?",(m.get(x.bunkName||"?")||0)+1);return m;},new Map())].sort((a,b)=>b[1]-a[1])[0];
+    const pending=display.filter(x=>(parseFloat(x.pendingAmount)||0)>0).length;
+    return{avgPolicy,topBunk:topBunk?topBunk[0]:"—",pending};
+  },[display]);
+
+  const isDateFiltered=!!(dateFrom||dateTo);
   const btn=(bg,color,outline)=>({padding:"8px 14px",borderRadius:8,border:`2px solid ${outline?"#6b7280":bg}`,background:outline?"transparent":bg,color:outline?"#6b7280":color,fontWeight:700,fontSize:12,cursor:"pointer"});
-  const TH={padding:"9px 10px",textAlign:"left",fontSize:11,fontWeight:700,color:"#4338ca",whiteSpace:"nowrap",borderBottom:"2px solid #a5b4fc",borderRight:"1px solid #c7d2fe",background:"#eef2ff"};
+  const TH={padding:"9px 10px",textAlign:"left",fontSize:11,fontWeight:700,color:"#4338ca",whiteSpace:"nowrap",borderBottom:"2px solid #a5b4fc",borderRight:"1px solid #c7d2fe",background:"#eef2ff",cursor:"pointer",userSelect:"none"};
   const TD={padding:"8px 10px",fontSize:12,whiteSpace:"nowrap",borderBottom:"1px solid #e0e7ff",borderRight:"1px solid #e0e7ff"};
   const OV={position:"fixed",inset:0,background:"rgba(30,27,75,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:16};
+  const sortArrow=k=>sortKey!==k?" ⇅":sortDir==="asc"?" ↑":" ↓";
 
   return(
     <div style={{minHeight:"100vh"}}>
-      {toast&&<div style={{position:"fixed",top:16,right:16,zIndex:9999,background:toast.type==="error"?"#ef4444":"#22c55e",color:"#fff",padding:"10px 18px",borderRadius:8,border:"2px solid rgba(255,255,255,0.4)",fontWeight:700,fontSize:13}}>{toast.msg}</div>}
+      {/* TOAST */}
+      {toast&&<div className="fade-in" style={{position:"fixed",top:16,right:16,zIndex:9999,background:toast.type==="error"?"#ef4444":"#22c55e",color:"#fff",padding:"10px 18px",borderRadius:8,border:"2px solid rgba(255,255,255,0.4)",fontWeight:700,fontSize:13}}>{toast.msg}</div>}
+
+      {/* UNDO BANNER */}
+      {undoStack&&<div className="fade-in" style={{position:"fixed",bottom:16,left:"50%",transform:"translateX(-50%)",zIndex:9999,background:"#1e1b4b",color:"#fff",padding:"10px 20px",borderRadius:10,border:"2px solid #6366f1",fontWeight:700,fontSize:13,display:"flex",alignItems:"center",gap:12}}>
+        <span>🗑 {undoStack.records.length} record{undoStack.records.length>1?"s":""} deleted</span>
+        <button onClick={doUndo} style={{background:"#6366f1",color:"#fff",border:"none",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontWeight:700,fontSize:12}}>↩ UNDO</button>
+        <button onClick={()=>setUndoStack(null)} style={{background:"none",color:"#a5b4fc",border:"none",cursor:"pointer",fontSize:16}}>✕</button>
+      </div>}
 
       {/* HEADER */}
       <div style={{background:"linear-gradient(135deg,#3b82f6,#6366f1)",borderRadius:14,border:"2px solid #818cf8",padding:"14px 16px",marginBottom:12}}>
@@ -268,38 +492,69 @@ function App(){
             <div style={{color:"#fff",fontSize:18,fontWeight:800}}>📋 TRAINEE CMS</div>
             <div style={{color:"#bfdbfe",fontSize:11,marginTop:2}}>
               {isHist?`VIEWING: ${histInv?.name}`:`ACTIVE: ${active?.name}`} • {(isHist?histInv?.records?.length:records.length)||0} RECORDS
+              {currentInv?.createdAt&&<span style={{marginLeft:8,opacity:.7}}>| CREATED: {currentInv.createdAt}</span>}
             </div>
           </div>
           <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-            {!isHist&&<button onClick={()=>{setForm(EMPTY());setEditId(null);setShowForm(true);}} style={btn("#3b82f6","#fff")}>+ ADD</button>}
-            <button onClick={()=>download(display,currentInv?.name)} style={btn("#10b981","#fff")}>⬇ DOWNLOAD</button>
+            {!isHist&&<button onClick={()=>{setForm(EMPTY());setEditId(null);setDupWarn(null);setShowForm(true);}} style={btn("#3b82f6","#fff")}>+ ADD</button>}
+            {selected.size>0&&!isHist&&<button onClick={()=>setShowBulkDel(true)} style={btn("#ef4444","#fff")}>🗑 DEL ({selected.size})</button>}
+            <div style={{display:"inline-flex"}}>
+              <button onClick={()=>download(display,currentInv?.name,"xls")} style={{...btn("#10b981","#fff"),borderTopRightRadius:0,borderBottomRightRadius:0,borderRight:"1px solid rgba(255,255,255,0.3)"}}>⬇ XLS</button>
+              <button onClick={()=>download(display,currentInv?.name,"csv")} style={{...btn("#10b981","#fff"),borderTopLeftRadius:0,borderBottomLeftRadius:0,padding:"8px 10px"}}>CSV</button>
+            </div>
             {!isHist&&<button onClick={()=>setShowClose(true)} style={btn("#f59e0b","#fff")}>🔒 CLOSE</button>}
             <button onClick={()=>setShowNew(true)} style={btn("#8b5cf6","#fff")}>✨ NEW CMS</button>
           </div>
         </div>
-        <div style={{display:"flex",gap:6,marginTop:10,flexWrap:"wrap"}}>
+        <div style={{display:"flex",gap:6,marginTop:10,flexWrap:"wrap",alignItems:"center"}}>
           {invs.filter(i=>!i.closedAt).map(i=>(
-            <button key={i.id} onClick={()=>{setActiveId(i.id);setView("active");setSearch("");setStatus(null);}}
-              style={{padding:"4px 12px",borderRadius:20,border:"2px solid #fff",fontSize:11,fontWeight:700,cursor:"pointer",
-                background:view==="active"&&activeId===i.id?"#fff":"transparent",
-                color:view==="active"&&activeId===i.id?"#3b82f6":"#fff"}}>
-              📂 {i.name}
-            </button>
+            <div key={i.id} style={{display:"flex",alignItems:"center",gap:2}}>
+              <button onClick={()=>{setActiveId(i.id);setView("active");setSearch("");setStatus(null);setSelected(new Set());setSortKey(null);setDateFrom("");setDateTo("");}}
+                style={{padding:"4px 12px",borderRadius:20,border:"2px solid #fff",fontSize:11,fontWeight:700,cursor:"pointer",background:view==="active"&&activeId===i.id?"#fff":"transparent",color:view==="active"&&activeId===i.id?"#3b82f6":"#fff"}}>📂 {i.name}</button>
+              <button onClick={()=>{setRenameId(i.id);setRenameName(i.name);}} title="Rename" style={{background:"rgba(255,255,255,0.15)",border:"none",borderRadius:10,color:"#fff",fontSize:10,cursor:"pointer",padding:"2px 5px"}}>✎</button>
+            </div>
           ))}
           {closed.map(i=>(
-            <button key={i.id} onClick={()=>{setView("history");setHistId(i.id);setStatus(null);}}
-              style={{padding:"4px 12px",borderRadius:20,border:"2px solid #fbbf24",fontSize:11,fontWeight:700,cursor:"pointer",
-                background:view==="history"&&histId===i.id?"#fbbf24":"transparent",
-                color:view==="history"&&histId===i.id?"#1e293b":"#fde68a"}}>
-              🔒 {i.name}
-            </button>
+            <button key={i.id} onClick={()=>{setView("history");setHistId(i.id);setStatus(null);setHistSearch("");setSelected(new Set());setSortKey(null);}}
+              style={{padding:"4px 12px",borderRadius:20,border:"2px solid #fbbf24",fontSize:11,fontWeight:700,cursor:"pointer",background:view==="history"&&histId===i.id?"#fbbf24":"transparent",color:view==="history"&&histId===i.id?"#1e293b":"#fde68a"}}>🔒 {i.name}</button>
           ))}
         </div>
       </div>
 
-      {isHist&&histInv&&<div style={{background:"#fef3c7",border:"2px solid #f59e0b",borderRadius:10,padding:"9px 14px",marginBottom:12,fontSize:12,color:"#92400e",fontWeight:700}}>🔒 CLOSED: {histInv.name} | {histInv.closedAt}</div>}
-      {!isHist&&<div style={{marginBottom:12,border:"2px solid #a5b4fc",borderRadius:10,background:"#fff",overflow:"hidden"}}>
-        <input placeholder="🔍 SEARCH..." value={search} onChange={e=>setSearch(e.target.value)} style={{width:"100%",padding:"10px 14px",border:"none",fontSize:13,outline:"none",background:"transparent"}}/>
+      {/* HISTORY BANNER */}
+      {isHist&&histInv&&<div style={{background:"#fef3c7",border:"2px solid #f59e0b",borderRadius:10,padding:"9px 14px",marginBottom:12,fontSize:12,color:"#92400e",fontWeight:700,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span>🔒 CLOSED: {histInv.name} | {histInv.closedAt}</span>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={()=>download(histInv.records,histInv.name,"xls")} style={{...btn("#f59e0b","#fff"),fontSize:10,padding:"4px 8px"}}>⬇ XLS</button>
+          <button onClick={()=>download(histInv.records,histInv.name,"csv")} style={{...btn("#f59e0b","#fff"),fontSize:10,padding:"4px 8px"}}>⬇ CSV</button>
+        </div>
+      </div>}
+
+      {/* SEARCH + DATE FILTER */}
+      <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"stretch"}}>
+        {/* Search */}
+        <div style={{flex:"2 1 200px",border:"2px solid #a5b4fc",borderRadius:10,background:"#fff",display:"flex",alignItems:"center",overflow:"hidden"}}>
+          <input placeholder="🔍 SEARCH..." value={isHist?histSearch:search}
+            onChange={e=>isHist?setHistSearch(e.target.value.toUpperCase()):setSearch(e.target.value.toUpperCase())}
+            style={{flex:1,padding:"10px 14px",border:"none",fontSize:13,outline:"none",background:"transparent"}}/>
+          {(isHist?histSearch:search)&&<button onClick={()=>isHist?setHistSearch(""):setSearch("")} style={{background:"none",border:"none",color:"#6b7280",cursor:"pointer",padding:"0 12px",fontSize:16}}>✕</button>}
+          {!isHist&&<div style={{padding:"0 12px",fontSize:11,color:"#6366f1",fontWeight:700,whiteSpace:"nowrap"}}>{display.length}/{records.length}</div>}
+        </div>
+        {/* Date Range Filter */}
+        <div style={{flex:"3 1 280px",border:`2px solid ${isDateFiltered?"#3b82f6":"#a5b4fc"}`,borderRadius:10,background:"#fff",display:"flex",alignItems:"center",gap:6,padding:"0 10px"}}>
+          <span style={{fontSize:11,fontWeight:700,color:"#4338ca",whiteSpace:"nowrap"}}>📅 FROM</span>
+          <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}
+            style={{flex:1,padding:"8px 4px",border:"none",fontSize:12,outline:"none",background:"transparent",minWidth:90}}/>
+          <span style={{fontSize:11,fontWeight:700,color:"#4338ca",whiteSpace:"nowrap"}}>TO</span>
+          <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}
+            style={{flex:1,padding:"8px 4px",border:"none",fontSize:12,outline:"none",background:"transparent",minWidth:90}}/>
+          {isDateFiltered&&<button onClick={()=>{setDateFrom("");setDateTo("");}} style={{background:"#ef4444",color:"#fff",border:"none",borderRadius:6,padding:"3px 8px",cursor:"pointer",fontSize:11,fontWeight:700,whiteSpace:"nowrap"}}>✕ CLEAR</button>}
+        </div>
+      </div>
+
+      {/* DATE FILTER BADGE */}
+      {isDateFiltered&&<div style={{background:"#dbeafe",border:"2px solid #3b82f6",borderRadius:8,padding:"5px 12px",marginBottom:10,fontSize:11,fontWeight:700,color:"#1d4ed8",display:"inline-block"}}>
+        📅 FILTERED: {dateFrom||"..."} → {dateTo||"..."} | {display.length} RECORD{display.length!==1?"S":""}
       </div>}
 
       {/* SUMMARY CARDS */}
@@ -309,152 +564,189 @@ function App(){
           {label:"TOTAL CASH",key:"cash",color:"#10b981",bg:"#d1fae5"},
           {label:"TOTAL PENDING",key:"pendingAmount",color:"#f59e0b",bg:"#fef3c7"},
           {label:"G PAY + CASH",key:"_sum",color:"#0ea5e9",bg:"#e0f2fe"},
+          {label:"POLICY COUNT",key:"policyCount",color:"#059669",bg:"#d1fae5",noRupee:true},
+          {label:"CMS AMOUNT",key:"cms",color:"#7c3aed",bg:"#f5f3ff"},
+          {label:"GPA AMOUNT",key:"gpaAmount",color:"#f43f5e",bg:"#ffe4e6"},
         ].map(s=>(
-          <div key={s.label} style={{background:s.bg,borderRadius:10,padding:"10px 16px",flex:"1 1 120px",border:`2px solid ${s.color}`}}>
+          <div key={s.label} style={{background:s.bg,borderRadius:10,padding:"10px 16px",flex:"1 1 100px",border:`2px solid ${s.color}`}}>
             <div style={{fontSize:10,color:s.color,fontWeight:700}}>{s.label}</div>
-            <div style={{fontSize:18,fontWeight:800,color:s.color}}>₹{(s.key==="_sum"?(dt.gPay||0)+(dt.cash||0):(dt[s.key]||0)).toLocaleString()}</div>
+            <div style={{fontSize:18,fontWeight:800,color:s.color}}>
+              {s.key==="_sum"?`₹${((totals.gPay||0)+(totals.cash||0)).toLocaleString()}`:s.noRupee?(totals[s.key]||0).toLocaleString():`₹${(totals[s.key]||0).toLocaleString()}`}
+            </div>
           </div>
         ))}
-        {/* Google Sheets Card */}
         <div style={{background:"#f0fdf4",borderRadius:10,padding:"10px 14px",flex:"1 1 200px",border:"2px solid #22c55e"}}>
-          <div style={{fontSize:10,color:"#15803d",fontWeight:700,marginBottom:4}}>
-            🟢 GOOGLE SHEETS — <span style={{color:"#0ea5e9"}}>{currentInv?.name||"—"}</span>
-          </div>
+          <div style={{fontSize:10,color:"#15803d",fontWeight:700,marginBottom:4}}>🟢 GOOGLE SHEETS — <span style={{color:"#0ea5e9"}}>{currentInv?.name||"—"}</span></div>
           <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
-            <button onClick={push} disabled={syncing} title={`Push "${currentInv?.name}" to its sheet tab`}
-              style={{...btn("#10b981","#fff"),fontSize:10,padding:"5px 8px",flex:"1 1 60px"}}>
-              {syncing?<span className="spin">⟳</span>:"↑ PUSH"}
-            </button>
-            <button onClick={pull} disabled={syncing} title={`Pull "${currentInv?.name}" from its sheet tab`}
-              style={{...btn("#3b82f6","#fff"),fontSize:10,padding:"5px 8px",flex:"1 1 60px"}}>
-              {syncing?<span className="spin">⟳</span>:"↓ PULL"}
-            </button>
-            <button onClick={pushAll} disabled={syncing} title="Push ALL CMS to their own sheet tabs"
-              style={{...btn("#8b5cf6","#fff"),fontSize:10,padding:"5px 8px",flex:"1 1 80px"}}>
-              {syncing?<span className="spin">⟳</span>:"↑↑ ALL"}
-            </button>
-            <button onClick={pullAll} disabled={syncing} title="Pull ALL sheet tabs into CMS"
-              style={{...btn("#f59e0b","#fff"),fontSize:10,padding:"5px 8px",flex:"1 1 80px"}}>
-              {syncing?<span className="spin">⟳</span>:"↓↓ ALL"}
-            </button>
+            {[["↑ PUSH",push,"#10b981"],["↓ PULL",pull,"#3b82f6"],["↑↑ ALL",pushAll,"#8b5cf6"],["↓↓ ALL",pullAll,"#f59e0b"]].map(([label,fn,color])=>(
+              <button key={label} onClick={fn} disabled={syncing} style={{...btn(color,"#fff"),fontSize:10,padding:"5px 8px",flex:"1 1 50px"}}>{syncing?<span className="spin">⟳</span>:label}</button>
+            ))}
           </div>
         </div>
       </div>
 
-      {status&&<div style={{marginBottom:12,padding:"9px 14px",borderRadius:10,fontSize:12,fontWeight:700,
-        background:status.ok?"#dcfce7":"#fee2e2",border:`2px solid ${status.ok?"#22c55e":"#ef4444"}`,
-        color:status.ok?"#15803d":"#dc2626"}}>{status.msg}</div>}
+      {/* QUICK STATS BAR */}
+      {stats&&display.length>0&&<div style={{background:"#fff",border:"2px solid #c7d2fe",borderRadius:10,padding:"8px 14px",marginBottom:12,display:"flex",gap:12,flexWrap:"wrap",fontSize:11,color:"#4338ca",fontWeight:700}}>
+        <span>📊 {display.length} RECORDS</span><span>|</span>
+        <span>📋 AVG POLICY: {stats.avgPolicy}</span><span>|</span>
+        <span>🏆 TOP BUNK: {stats.topBunk}</span><span>|</span>
+        <span style={{color:stats.pending>0?"#f59e0b":"#10b981"}}>⚠ {stats.pending} WITH PENDING</span>
+        {selected.size>0&&<><span>|</span><span style={{color:"#ef4444"}}>☑ {selected.size} SELECTED</span></>}
+      </div>}
+
+      {status&&<div style={{marginBottom:12,padding:"9px 14px",borderRadius:10,fontSize:12,fontWeight:700,background:status.ok?"#dcfce7":"#fee2e2",border:`2px solid ${status.ok?"#22c55e":"#ef4444"}`,color:status.ok?"#15803d":"#dc2626"}}>{status.msg}</div>}
+
+      {/* PER-BUNK SUMMARY */}
+      <BunkSummary records={display}/>
 
       {/* TABLE */}
       <div style={{background:"#fff",borderRadius:12,border:"2px solid #a5b4fc",overflowX:"auto"}}>
-        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:1200}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:1300}}>
           <thead><tr>
-            <th style={TH}>S NO</th>
-            {COLS.map(c=><th key={c.key} style={TH}>{c.label}</th>)}
-            {!isHist&&<th style={TH}>ACTIONS</th>}
+            {!isHist&&<th style={{...TH,cursor:"default"}}><input type="checkbox" checked={selected.size===display.length&&display.length>0} onChange={selectAll} style={{cursor:"pointer"}}/></th>}
+            <th style={{...TH,cursor:"default"}}>S NO</th>
+            {COLS.map(c=><th key={c.key} style={TH} onClick={()=>toggleSort(c.key)}>{c.label}{sortArrow(c.key)}</th>)}
+            {!isHist&&<th style={{...TH,cursor:"default"}}>ACTIONS</th>}
           </tr></thead>
           <tbody>
             {display.length===0?(
-              <tr><td colSpan={COLS.length+2} style={{textAlign:"center",padding:36,color:"#9ca3af"}}>NO RECORDS. ADD ONE!</td></tr>
+              <tr><td colSpan={COLS.length+3} style={{textAlign:"center",padding:36,color:"#9ca3af"}}>
+                {(currentSearch||isDateFiltered)?"NO MATCHING RECORDS. CLEAR FILTERS.":"NO RECORDS. ADD ONE!"}
+              </td></tr>
             ):display.map((r,i)=>(
-              <tr key={r.id} style={{background:i%2===0?"#fff":"#f5f7ff"}}>
+              <tr key={r.id} style={{background:selected.has(r.id)?"#ede9fe":i%2===0?"#fff":"#f5f7ff"}}>
+                {!isHist&&<td style={{...TD,textAlign:"center"}}><input type="checkbox" checked={selected.has(r.id)} onChange={()=>toggleSelect(r.id)} style={{cursor:"pointer"}}/></td>}
                 <td style={{...TD,fontWeight:700,color:"#6366f1"}}>{i+1}</td>
                 {COLS.map(c=>(
-                  <td key={c.key} style={{...TD,fontWeight:c.type==="number"?600:400,color:c.type==="number"?"#1d4ed8":"#374151"}}>
-                    {c.type==="number"&&r[c.key]&&!isNaN(parseFloat(r[c.key]))?`₹${parseFloat(r[c.key]).toLocaleString()}`:(r[c.key]||"—")}
+                  <td key={c.key} style={{...TD,fontWeight:c.type==="number"?600:400,color:c.type==="number"?"#1d4ed8":"#374151",
+                    background:c.key==="pendingAmount"&&(parseFloat(r[c.key])||0)>0?"#fef9c3":"inherit",
+                    padding:!isHist?"4px 8px":TD.padding}}>
+                    {!isHist
+                      ?<InlineCell rec={r} col={c} onSave={(key,val)=>inlineSave(r.id,key,val)}/>
+                      :(c.type==="number"&&r[c.key]&&!isNaN(parseFloat(r[c.key]))?`₹${parseFloat(r[c.key]).toLocaleString()}`:(r[c.key]||"—"))
+                    }
                   </td>
                 ))}
                 {!isHist&&<td style={{...TD,whiteSpace:"nowrap"}}>
-                  <button onClick={()=>{setForm({...r});setEditId(r.id);setShowForm(true);}} style={{padding:"4px 8px",borderRadius:6,border:"1.5px solid #3b82f6",background:"#dbeafe",color:"#1d4ed8",cursor:"pointer",fontSize:11,fontWeight:700}}>✏ EDIT</button>
-                  <button onClick={()=>setDelId(r.id)} style={{padding:"4px 8px",borderRadius:6,border:"1.5px solid #ef4444",background:"#fee2e2",color:"#dc2626",cursor:"pointer",fontSize:11,fontWeight:700,marginLeft:6}}>🗑</button>
+                  <button onClick={()=>{setForm({...r});setEditId(r.id);setDupWarn(null);setShowForm(true);}} style={{padding:"4px 8px",borderRadius:6,border:"1.5px solid #3b82f6",background:"#dbeafe",color:"#1d4ed8",cursor:"pointer",fontSize:11,fontWeight:700}}>✏</button>
+                  <button onClick={()=>duplicateRecord(r)} style={{padding:"4px 8px",borderRadius:6,border:"1.5px solid #8b5cf6",background:"#ede9fe",color:"#5b21b6",cursor:"pointer",fontSize:11,fontWeight:700,marginLeft:4}}>⧉</button>
+                  <button onClick={()=>setDelId(r.id)} style={{padding:"4px 8px",borderRadius:6,border:"1.5px solid #ef4444",background:"#fee2e2",color:"#dc2626",cursor:"pointer",fontSize:11,fontWeight:700,marginLeft:4}}>🗑</button>
                 </td>}
               </tr>
             ))}
-            {display.length>0&&(
-              <tr style={{background:"#ede9fe",fontWeight:700,borderTop:"2px solid #818cf8"}}>
-                <td style={TD} colSpan={3}>TOTAL ({display.length})</td>
-                {COLS.slice(2).map(c=><td key={c.key} style={{...TD,color:"#5b21b6"}}>{c.type==="number"?`₹${(dt[c.key]||0).toLocaleString()}`:""}</td>)}
-                {!isHist&&<td style={TD}/>}
-              </tr>
-            )}
+            {display.length>0&&<tr style={{background:"#ede9fe",fontWeight:700,borderTop:"2px solid #818cf8"}}>
+              {!isHist&&<td style={TD}/>}
+              <td style={TD} colSpan={3}>TOTAL ({display.length})</td>
+              {COLS.slice(2).map(c=><td key={c.key} style={{...TD,color:"#5b21b6"}}>{c.type==="number"?`₹${(totals[c.key]||0).toLocaleString()}`:""}</td>)}
+              {!isHist&&<td style={TD}/>}
+            </tr>}
           </tbody>
         </table>
       </div>
 
       {/* ADD/EDIT MODAL */}
-      {showForm&&(
-        <div style={OV}>
-          <div style={{background:"#fff",borderRadius:14,border:"2px solid #6366f1",padding:20,width:"95%",maxWidth:680,maxHeight:"90vh",overflowY:"auto"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,paddingBottom:12,borderBottom:"2px solid #e0e7ff"}}>
-              <div style={{fontSize:16,fontWeight:800}}>{editId?"✏ EDIT RECORD":"➕ NEW RECORD"}</div>
-              <button onClick={()=>{setShowForm(false);setEditId(null);}} style={{background:"none",border:"2px solid #e2e8f0",borderRadius:6,fontSize:16,cursor:"pointer",color:"#6b7280",width:32,height:32}}>✕</button>
-            </div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-              {COLS.map(c=>(
-                <div key={c.key} style={{display:"flex",flexDirection:"column",gap:3,border:"1.5px solid #e0e7ff",borderRadius:8,padding:"8px 10px",background:"#f8faff"}}>
-                  <label style={{fontSize:10,fontWeight:700,color:"#6366f1"}}>{c.label}</label>
-                  <input type={c.type==="number"?"number":c.type==="date"?"date":"text"}
-                    value={form[c.key]}
-                    onChange={e=>setForm(f=>({...f,[c.key]:c.type==="number"||c.type==="date"?e.target.value:e.target.value.toUpperCase()}))}
-                    style={{padding:"6px 8px",borderRadius:6,border:"1.5px solid #c7d2fe",fontSize:12,outline:"none",background:"#fff"}}
-                    placeholder={c.label}/>
-                </div>
-              ))}
-            </div>
-            <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:16,paddingTop:12,borderTop:"2px solid #e0e7ff"}}>
-              <button onClick={()=>{setShowForm(false);setEditId(null);}} style={btn("transparent","#6b7280",true)}>CANCEL</button>
-              {!editId&&<button onClick={saveSync} style={btn("#22c55e","#fff")}>💾 SAVE + SYNC ↑</button>}
-              <button onClick={save} style={btn("#3b82f6","#fff")}>💾 SAVE</button>
-            </div>
+      {showForm&&<div style={OV}>
+        <div style={{background:"#fff",borderRadius:14,border:"2px solid #6366f1",padding:20,width:"95%",maxWidth:680,maxHeight:"90vh",overflowY:"auto"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,paddingBottom:12,borderBottom:"2px solid #e0e7ff"}}>
+            <div style={{fontSize:16,fontWeight:800}}>{editId?"✏ EDIT RECORD":"➕ NEW RECORD"}</div>
+            <button onClick={()=>{setShowForm(false);setEditId(null);setForm(EMPTY());setDupWarn(null);}} style={{background:"none",border:"2px solid #e2e8f0",borderRadius:6,fontSize:16,cursor:"pointer",color:"#6b7280",width:32,height:32}}>✕</button>
+          </div>
+
+          {/* DUPLICATE WARNING */}
+          {dupWarn&&<div style={{background:"#fef3c7",border:"2px solid #f59e0b",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:12,fontWeight:700,color:"#92400e"}}>
+            {dupWarn}
+          </div>}
+
+          {/* AUTO SERVICE CHARGE HINT */}
+          <div style={{background:"#f0fdf4",border:"1.5px solid #86efac",borderRadius:8,padding:"7px 12px",marginBottom:12,fontSize:11,color:"#15803d",fontWeight:700}}>
+            💡 SERVICE CHARGE = POLICY COUNT × ₹{SERVICE_CHARGE_RATE} (AUTO-FILLED)
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            {COLS.map(c=>(
+              <div key={c.key} style={{display:"flex",flexDirection:"column",gap:3,border:`1.5px solid ${c.key==="serviceCharge"?"#86efac":"#e0e7ff"}`,borderRadius:8,padding:"8px 10px",background:c.key==="serviceCharge"?"#f0fdf4":"#f8faff"}}>
+                <label style={{fontSize:10,fontWeight:700,color:c.key==="serviceCharge"?"#15803d":"#6366f1"}}>
+                  {c.label}
+                  {["bunkName","traineeName"].includes(c.key)&&<span style={{color:"#ef4444"}}> *</span>}
+                  {c.key==="serviceCharge"&&<span style={{color:"#15803d"}}> ✦ AUTO</span>}
+                </label>
+                <input
+                  type={c.type==="number"?"number":c.type==="date"?"date":"text"}
+                  value={form[c.key]}
+                  readOnly={c.key==="serviceCharge"}
+                  onChange={e=>handleFormChange(c.key,c.type==="number"||c.type==="date"?e.target.value:e.target.value.toUpperCase())}
+                  style={{padding:"6px 8px",borderRadius:6,border:"1.5px solid #c7d2fe",fontSize:12,outline:"none",background:c.key==="serviceCharge"?"#dcfce7":"#fff",cursor:c.key==="serviceCharge"?"not-allowed":"text"}}
+                  placeholder={c.key==="serviceCharge"?"AUTO FROM POLICY COUNT":c.label}
+                />
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:16,paddingTop:12,borderTop:"2px solid #e0e7ff"}}>
+            <button onClick={()=>{setShowForm(false);setEditId(null);setForm(EMPTY());setDupWarn(null);}} style={btn("transparent","#6b7280",true)}>CANCEL</button>
+            <button onClick={saveSync} style={btn("#22c55e","#fff")}>💾 SAVE + SYNC ↑</button>
+            <button onClick={save} style={btn("#3b82f6","#fff")}>💾 SAVE</button>
           </div>
         </div>
-      )}
+      </div>}
 
       {/* CLOSE CONFIRM */}
-      {showClose&&(
-        <div style={OV}>
-          <div style={{background:"#fff",borderRadius:14,border:"2px solid #f59e0b",padding:24,maxWidth:340,width:"90%",textAlign:"center"}}>
-            <div style={{fontSize:36,marginBottom:8}}>🔒</div>
-            <div style={{fontSize:16,fontWeight:800,marginBottom:8}}>CLOSE THIS CMS?</div>
-            <div style={{color:"#6b7280",fontSize:12,marginBottom:16,border:"1.5px solid #fde68a",borderRadius:8,padding:10,background:"#fffbeb"}}>THIS CMS WILL BE LOCKED & SAVED IN HISTORY. YOU CAN STILL VIEW IT ANYTIME.</div>
-            <div style={{display:"flex",gap:8,justifyContent:"center"}}>
-              <button onClick={()=>setShowClose(false)} style={btn("transparent","#6b7280",true)}>CANCEL</button>
-              <button onClick={closeInv} style={btn("#f59e0b","#fff")}>🔒 CLOSE & SAVE</button>
-            </div>
-          </div>
+      {showClose&&<div style={OV}><div style={{background:"#fff",borderRadius:14,border:"2px solid #f59e0b",padding:24,maxWidth:340,width:"90%",textAlign:"center"}}>
+        <div style={{fontSize:36,marginBottom:8}}>🔒</div>
+        <div style={{fontSize:16,fontWeight:800,marginBottom:8}}>CLOSE THIS CMS?</div>
+        <div style={{color:"#6b7280",fontSize:12,marginBottom:16,border:"1.5px solid #fde68a",borderRadius:8,padding:10,background:"#fffbeb"}}>THIS CMS WILL BE LOCKED & SAVED IN HISTORY.</div>
+        <div style={{display:"flex",gap:8,justifyContent:"center"}}>
+          <button onClick={()=>setShowClose(false)} style={btn("transparent","#6b7280",true)}>CANCEL</button>
+          <button onClick={closeInv} style={btn("#f59e0b","#fff")}>🔒 CLOSE & SAVE</button>
         </div>
-      )}
+      </div></div>}
 
-      {/* NEW CMS MODAL */}
-      {showNew&&(
-        <div style={OV}>
-          <div style={{background:"#fff",borderRadius:14,border:"2px solid #8b5cf6",padding:24,maxWidth:340,width:"90%",textAlign:"center"}}>
-            <div style={{fontSize:36,marginBottom:8}}>✨</div>
-            <div style={{fontSize:16,fontWeight:800,marginBottom:14}}>NEW CMS</div>
-            <input value={newName} onChange={e=>setNewName(e.target.value.toUpperCase())} placeholder="NAME (E.G. MARCH 2026)"
-              style={{width:"100%",padding:"10px 12px",borderRadius:8,border:"2px solid #c4b5fd",fontSize:13,boxSizing:"border-box",outline:"none",marginBottom:16}}/>
-            <div style={{display:"flex",gap:8,justifyContent:"center"}}>
-              <button onClick={()=>setShowNew(false)} style={btn("transparent","#6b7280",true)}>CANCEL</button>
-              <button onClick={newInv} style={btn("#8b5cf6","#fff")}>✨ START FRESH</button>
-            </div>
-          </div>
+      {/* NEW CMS */}
+      {showNew&&<div style={OV}><div style={{background:"#fff",borderRadius:14,border:"2px solid #8b5cf6",padding:24,maxWidth:340,width:"90%",textAlign:"center"}}>
+        <div style={{fontSize:36,marginBottom:8}}>✨</div>
+        <div style={{fontSize:16,fontWeight:800,marginBottom:14}}>NEW CMS</div>
+        <input value={newName} onChange={e=>setNewName(e.target.value.toUpperCase())} placeholder="NAME (E.G. MARCH 2026)"
+          style={{width:"100%",padding:"10px 12px",borderRadius:8,border:"2px solid #c4b5fd",fontSize:13,boxSizing:"border-box",outline:"none",marginBottom:16}}
+          onKeyDown={e=>e.key==="Enter"&&newInv()}/>
+        <div style={{display:"flex",gap:8,justifyContent:"center"}}>
+          <button onClick={()=>{setShowNew(false);setNewName("");}} style={btn("transparent","#6b7280",true)}>CANCEL</button>
+          <button onClick={newInv} style={btn("#8b5cf6","#fff")}>✨ START FRESH</button>
         </div>
-      )}
+      </div></div>}
 
-      {/* DELETE CONFIRM */}
-      {delId&&(
-        <div style={OV}>
-          <div style={{background:"#fff",borderRadius:14,border:"2px solid #ef4444",padding:24,maxWidth:320,width:"90%",textAlign:"center"}}>
-            <div style={{fontSize:36,marginBottom:8}}>🗑️</div>
-            <div style={{fontSize:16,fontWeight:800,marginBottom:8}}>DELETE RECORD?</div>
-            <div style={{color:"#6b7280",marginBottom:16,fontSize:12,padding:8,border:"1.5px solid #fee2e2",borderRadius:8,background:"#fff5f5"}}>THIS CANNOT BE UNDONE.</div>
-            <div style={{display:"flex",gap:8,justifyContent:"center"}}>
-              <button onClick={()=>setDelId(null)} style={btn("transparent","#6b7280",true)}>CANCEL</button>
-              <button onClick={()=>{upd(r=>r.filter(x=>x.id!==delId));setDelId(null);showToast("Deleted!","error");}} style={btn("#ef4444","#fff")}>DELETE</button>
-            </div>
-          </div>
+      {/* RENAME */}
+      {renameId&&<div style={OV}><div style={{background:"#fff",borderRadius:14,border:"2px solid #3b82f6",padding:24,maxWidth:340,width:"90%",textAlign:"center"}}>
+        <div style={{fontSize:36,marginBottom:8}}>✎</div>
+        <div style={{fontSize:16,fontWeight:800,marginBottom:14}}>RENAME CMS</div>
+        <input value={renameName} onChange={e=>setRenameName(e.target.value.toUpperCase())} placeholder="NEW NAME"
+          style={{width:"100%",padding:"10px 12px",borderRadius:8,border:"2px solid #93c5fd",fontSize:13,boxSizing:"border-box",outline:"none",marginBottom:16}}
+          onKeyDown={e=>e.key==="Enter"&&doRename()}/>
+        <div style={{display:"flex",gap:8,justifyContent:"center"}}>
+          <button onClick={()=>setRenameId(null)} style={btn("transparent","#6b7280",true)}>CANCEL</button>
+          <button onClick={doRename} style={btn("#3b82f6","#fff")}>✎ RENAME</button>
         </div>
-      )}
+      </div></div>}
+
+      {/* DELETE */}
+      {delId&&<div style={OV}><div style={{background:"#fff",borderRadius:14,border:"2px solid #ef4444",padding:24,maxWidth:320,width:"90%",textAlign:"center"}}>
+        <div style={{fontSize:36,marginBottom:8}}>🗑️</div>
+        <div style={{fontSize:16,fontWeight:800,marginBottom:8}}>DELETE RECORD?</div>
+        <div style={{color:"#6b7280",marginBottom:16,fontSize:12,padding:8,border:"1.5px solid #fee2e2",borderRadius:8,background:"#fff5f5"}}>YOU CAN UNDO FOR 8 SECONDS.</div>
+        <div style={{display:"flex",gap:8,justifyContent:"center"}}>
+          <button onClick={()=>setDelId(null)} style={btn("transparent","#6b7280",true)}>CANCEL</button>
+          <button onClick={()=>deleteRecord(delId)} style={btn("#ef4444","#fff")}>DELETE</button>
+        </div>
+      </div></div>}
+
+      {/* BULK DELETE */}
+      {showBulkDel&&<div style={OV}><div style={{background:"#fff",borderRadius:14,border:"2px solid #ef4444",padding:24,maxWidth:340,width:"90%",textAlign:"center"}}>
+        <div style={{fontSize:36,marginBottom:8}}>🗑️</div>
+        <div style={{fontSize:16,fontWeight:800,marginBottom:8}}>DELETE {selected.size} RECORDS?</div>
+        <div style={{color:"#6b7280",marginBottom:16,fontSize:12,padding:8,border:"1.5px solid #fee2e2",borderRadius:8,background:"#fff5f5"}}>YOU CAN UNDO FOR 8 SECONDS.</div>
+        <div style={{display:"flex",gap:8,justifyContent:"center"}}>
+          <button onClick={()=>setShowBulkDel(false)} style={btn("transparent","#6b7280",true)}>CANCEL</button>
+          <button onClick={doBulkDelete} style={btn("#ef4444","#fff")}>DELETE ALL</button>
+        </div>
+      </div></div>}
     </div>
   );
 }
