@@ -88,6 +88,7 @@ function InlineCell({rec,col,onSave}){
       onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){setEditing(false);setVal(rec[col.key]||"");}}}/>;
   }
   const fmtDate=v=>{if(!v)return"—";const d=v.split("T")[0];const p=d.split("-");return p.length===3?`${p[2]}-${p[1]}-${p[0]}`:d;};const disp=col.type==="number"&&rec[col.key]&&!isNaN(parseFloat(rec[col.key]))?`₹${parseFloat(rec[col.key]).toLocaleString()}`:col.type==="date"?fmtDate(rec[col.key]):(rec[col.key]||"—");
+
   return <span onClick={()=>{setVal(rec[col.key]||"");setEditing(true);}} title="Click to edit"
     style={{cursor:"text",display:"block",minWidth:40,paddingBottom:1,borderBottom:"1px dashed transparent",transition:"border-color .15s"}}
     onMouseEnter={e=>e.currentTarget.style.borderBottomColor="#a5b4fc"}
@@ -229,15 +230,19 @@ function App(){
     return baseDisplay.filter(r=>COLS.some(c=>String(r[c.key]||"").toLowerCase().includes(q)));
   },[baseDisplay,currentSearch]);
 
+  // Parse date string as local date (avoids UTC timezone shift)
+  const parseLocalDate=s=>{if(!s)return null;const p=s.split("T")[0].split("-");return p.length===3?new Date(+p[0],+p[1]-1,+p[2]):null;};
   // NEW: date range filter applied after search
   const dateFiltered=useMemo(()=>{
     if(!dateFrom&&!dateTo)return searched;
+    const dFrom=parseLocalDate(dateFrom),dTo=parseLocalDate(dateTo);
     return searched.filter(r=>{
       const rf=r.fromDate,rt=r.toDate;
       if(!rf&&!rt)return false;
-      const recFrom=new Date(rf||rt),recTo=new Date(rt||rf);
-      if(dateFrom&&recTo<new Date(dateFrom))return false;
-      if(dateTo&&recFrom>new Date(dateTo))return false;
+      const recFrom=parseLocalDate(rf||rt),recTo=parseLocalDate(rt||rf);
+      if(!recFrom||!recTo)return false;
+      if(dFrom&&recTo<dFrom)return false;
+      if(dTo&&recFrom>dTo)return false;
       return true;
     });
   },[searched,dateFrom,dateTo]);
@@ -248,7 +253,7 @@ function App(){
       let av=a[sortKey]||"",bv=b[sortKey]||"";
       const col=COLS.find(c=>c.key===sortKey);
       if(col?.type==="number"){av=parseFloat(av)||0;bv=parseFloat(bv)||0;}
-      if(col?.type==="date"){av=av?new Date(av):new Date(0);bv=bv?new Date(bv):new Date(0);}
+      if(col?.type==="date"){av=av?parseLocalDate(av)||new Date(0):new Date(0);bv=bv?parseLocalDate(bv)||new Date(0):new Date(0);}
       if(av<bv)return sortDir==="asc"?-1:1;
       if(av>bv)return sortDir==="asc"?1:-1;
       return 0;
