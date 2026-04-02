@@ -40,6 +40,7 @@ const COLS=[
   {key:"gPay",label:"G Pay",type:"number"},
   {key:"expense",label:"Expense",type:"number"},
   {key:"incentive",label:"Incentive",type:"number"},
+  {key:"officePaid",label:"Office Paid",type:"number"},
   {key:"fromDate",label:"From Date",type:"date"},
   {key:"toDate",label:"To Date",type:"date"},
   {key:"receivedByCash",label:"Received By Cash"},
@@ -86,7 +87,7 @@ function InlineCell({rec,col,onSave}){
       onBlur={commit}
       onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){setEditing(false);setVal(rec[col.key]||"");}}}/>;
   }
-  const disp=col.type==="number"&&rec[col.key]&&!isNaN(parseFloat(rec[col.key]))?`₹${parseFloat(rec[col.key]).toLocaleString()}`:(rec[col.key]||"—");
+  const fmtDate=v=>{if(!v)return"—";const d=v.split("T")[0];const p=d.split("-");return p.length===3?`${p[2]}-${p[1]}-${p[0]}`:d;};const disp=col.type==="number"&&rec[col.key]&&!isNaN(parseFloat(rec[col.key]))?`₹${parseFloat(rec[col.key]).toLocaleString()}`:col.type==="date"?fmtDate(rec[col.key]):(rec[col.key]||"—");
   return <span onClick={()=>{setVal(rec[col.key]||"");setEditing(true);}} title="Click to edit"
     style={{cursor:"text",display:"block",minWidth:40,paddingBottom:1,borderBottom:"1px dashed transparent",transition:"border-color .15s"}}
     onMouseEnter={e=>e.currentTarget.style.borderBottomColor="#a5b4fc"}
@@ -128,6 +129,7 @@ function BunkSummary({records}){
                   <span>💵 CASH: ₹{(bt.cash||0).toLocaleString()}</span>
                   <span>📱 GPAY: ₹{(bt.gPay||0).toLocaleString()}</span>
                   <span style={{color:(bt.pendingAmount||0)>0?"#f59e0b":"#10b981",fontWeight:700}}>⏳ PENDING: ₹{(bt.pendingAmount||0).toLocaleString()}</span>
+                  <span style={{color:"#7c3aed",fontWeight:700}}>🏢 OFFICE PAID: ₹{(bt.officePaid||0).toLocaleString()}</span>
                   <span>{openBunks.has(bunk)?"▲":"▼"}</span>
                 </div>
               </button>
@@ -138,7 +140,7 @@ function BunkSummary({records}){
                       <tr style={{background:"#eef2ff"}}>
                         <th style={TH2}>#</th>
                         <th style={TH2}>TRAINEE NAME</th>
-                        {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount"].map(k=>(
+                        {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount","officePaid"].map(k=>(
                           <th key={k} style={TH2}>{COLS.find(c=>c.key===k)?.label}</th>
                         ))}
                       </tr>
@@ -148,10 +150,10 @@ function BunkSummary({records}){
                         <tr key={r.id} style={{background:i%2===0?"#fff":"#f8f9ff"}}>
                           <td style={{...TD2,fontWeight:700,color:"#6366f1"}}>{i+1}</td>
                           <td style={{...TD2,color:"#374151",fontWeight:600}}>{r.traineeName||"—"}</td>
-                          {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount"].map(k=>(
+                          {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount","officePaid"].map(k=>(
                             <td key={k} style={{...TD2,fontWeight:600,
-                              color:(k==="pendingAmount"&&(parseFloat(r[k])||0)>0)?"#d97706":"#1d4ed8",
-                              background:(k==="pendingAmount"&&(parseFloat(r[k])||0)>0)?"#fef9c3":"inherit"}}>
+                              color:(k==="pendingAmount"&&(parseFloat(r[k])||0)>0)?"#d97706":(k==="officePaid"?"#7c3aed":"#1d4ed8"),
+                              background:(k==="pendingAmount"&&(parseFloat(r[k])||0)>0)?"#fef9c3":(k==="officePaid"?"#f5f3ff":"inherit")}}>
                               {r[k]&&!isNaN(parseFloat(r[k]))?`₹${parseFloat(r[k]).toLocaleString()}`:(r[k]||"—")}
                             </td>
                           ))}
@@ -159,7 +161,7 @@ function BunkSummary({records}){
                       ))}
                       <tr style={{background:"#ede9fe",fontWeight:700,borderTop:"1.5px solid #818cf8"}}>
                         <td style={TD2} colSpan={2}>TOTAL</td>
-                        {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount"].map(k=>(
+                        {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount","officePaid"].map(k=>(
                           <td key={k} style={{...TD2,color:"#5b21b6"}}>₹{(bt[k]||0).toLocaleString()}</td>
                         ))}
                       </tr>
@@ -294,7 +296,7 @@ function App(){
 
   const save=()=>{
     if(!form.bunkName||!form.traineeName){showToast("Bunk Name & Trainee Name required","error");return;}
-    if(editId===null&&checkDup(form.traineeName))showToast(`⚠ DUPLICATE: ${form.traineeName} already exists!`,"error");
+    if(editId===null&&checkDup(form.traineeName)){showToast(`⚠ DUPLICATE: ${form.traineeName} already exists!`,"error");return;}
     if(editId!==null){upd(r=>r.map(x=>x.id===editId?{...form,id:editId}:x));showToast("Updated!");}
     else{upd(r=>[...r,{...form,id:uid()}]);showToast("Added!");}
     setShowForm(false);setEditId(null);setForm(EMPTY());setDupWarn(null);
@@ -302,7 +304,7 @@ function App(){
 
   const saveSync=async()=>{
     if(!form.bunkName||!form.traineeName){showToast("Bunk Name & Trainee Name required","error");return;}
-    if(editId===null&&checkDup(form.traineeName))showToast(`⚠ DUPLICATE: ${form.traineeName} already exists!`,"error");
+    if(editId===null&&checkDup(form.traineeName)){showToast(`⚠ DUPLICATE: ${form.traineeName} already exists!`,"error");return;}
     const rec={...form,id:editId!==null?editId:uid()};
     if(editId!==null){upd(r=>r.map(x=>x.id===editId?rec:x));}else{upd(r=>[...r,rec]);}
     setShowForm(false);setEditId(null);setForm(EMPTY());setDupWarn(null);
@@ -567,6 +569,7 @@ function App(){
           {label:"POLICY COUNT",key:"policyCount",color:"#059669",bg:"#d1fae5",noRupee:true},
           {label:"CMS AMOUNT",key:"cms",color:"#7c3aed",bg:"#f5f3ff"},
           {label:"GPA AMOUNT",key:"gpaAmount",color:"#f43f5e",bg:"#ffe4e6"},
+          {label:"OFFICE PAID",key:"officePaid",color:"#7c3aed",bg:"#f5f3ff"},
         ].map(s=>(
           <div key={s.label} style={{background:s.bg,borderRadius:10,padding:"10px 16px",flex:"1 1 100px",border:`2px solid ${s.color}`}}>
             <div style={{fontSize:10,color:s.color,fontWeight:700}}>{s.label}</div>
@@ -623,7 +626,7 @@ function App(){
                     padding:!isHist?"4px 8px":TD.padding}}>
                     {!isHist
                       ?<InlineCell rec={r} col={c} onSave={(key,val)=>inlineSave(r.id,key,val)}/>
-                      :(c.type==="number"&&r[c.key]&&!isNaN(parseFloat(r[c.key]))?`₹${parseFloat(r[c.key]).toLocaleString()}`:(r[c.key]||"—"))
+                      :(c.type==="number"&&r[c.key]&&!isNaN(parseFloat(r[c.key]))?`₹${parseFloat(r[c.key]).toLocaleString()}`:c.type==="date"?(r[c.key]?(r[c.key].split("T")[0].split("-").reverse().join("-")):"—"):(r[c.key]||"—"))
                     }
                   </td>
                 ))}
