@@ -311,14 +311,17 @@ function App(){
     if(!form.bunkName||!form.traineeName){showToast("Bunk Name & Trainee Name required","error");return;}
     if(editId===null&&checkDup(form.traineeName)){showToast(`⚠ DUPLICATE: ${form.traineeName} already exists!`,"error");return;}
     const rec={...form,id:editId!==null?editId:uid()};
+    // Build the committed records list synchronously before async sheet push
+    const committedRecords=editId!==null
+      ?(active?.records||[]).map(x=>x.id===editId?rec:x)
+      :[...(active?.records||[]),rec];
     if(editId!==null){upd(r=>r.map(x=>x.id===editId?rec:x));}else{upd(r=>[...r,rec]);}
     setShowForm(false);setEditId(null);setForm(EMPTY());setDupWarn(null);
     try{
       const sheetName=active?.name||"Sheet1";
       const header=COLS.map(c=>c.label.toUpperCase());
       if(editId!==null){
-        const allRecs=active?active.records.map(x=>x.id===editId?rec:x):[];
-        const json=await scriptCall({action:"push",sheetName,rows:[header,...allRecs.map(r=>COLS.map(c=>String(r[c.key]||"")))]});
+        const json=await scriptCall({action:"push",sheetName,rows:[header,...committedRecords.map(r=>COLS.map(c=>String(r[c.key]||"")))]});
         if(json.ok){showToast("Updated + Synced ✓");}else{showToast("Updated (sync error)","error");}
       } else {
         const json=await scriptCall({action:"append",sheetName,header,rows:[COLS.map(c=>String(rec[c.key]||""))]});
@@ -343,16 +346,17 @@ function App(){
 
   const pushAll=async()=>{
     setSyncing(true);setStatus(null);
-    try{
-      let count=0;
-      for(const inv of invs){
-        if(!inv.records.length)continue;
+    let count=0,failed=0;
+    for(const inv of invs){
+      if(!inv.records.length)continue;
+      try{
         const header=COLS.map(c=>c.label.toUpperCase());
         await scriptCall({action:"push",sheetName:inv.name,rows:[header,...inv.records.map(r=>COLS.map(c=>String(r[c.key]||"")))]});
         count++;
-      }
-      setStatus({msg:`✓ All ${count} CMS pushed!`,ok:true});showToast("All CMS pushed!");
-    }catch(e){setStatus({msg:"Push all failed: "+e.message,ok:false});}
+      }catch(e){failed++;}
+    }
+    if(failed===0){setStatus({msg:`✓ All ${count} CMS pushed!`,ok:true});showToast("All CMS pushed!");}
+    else{setStatus({msg:`Pushed ${count}, failed ${failed}`,ok:false});showToast(`${failed} CMS failed to push`,"error");}
     setSyncing(false);
   };
 
@@ -401,8 +405,8 @@ function App(){
 
   const closeInv=()=>{
     const closedAt=new Date().toLocaleString();
-    setInvs(p=>p.map(i=>i.id===activeId?{...i,closedAt}:i));
     const remaining=invs.filter(i=>i.id!==activeId&&!i.closedAt);
+    setInvs(p=>p.map(i=>i.id===activeId?{...i,closedAt}:i));
     if(remaining.length){setActiveId(remaining[0].id);setView("active");}
     else{setHistId(activeId);setView("history");}
     setShowClose(false);showToast("CMS Closed!");setSelected(new Set());
@@ -446,12 +450,20 @@ function App(){
 
   const doUndo=()=>{
     if(!undoStack)return;
-    setInvs(p=>p.map(i=>i.id===undoStack.invId?{...i,records:[...i.records,...undoStack.records]}:i));
+    setInvs(p=>p.map(i=>{
+      if(i.id!==undoStack.invId)return i;
+      // Merge restored records back, avoiding duplicates, preserving order
+      const existingIds=new Set(i.records.map(r=>r.id));
+      const toRestore=undoStack.records.filter(r=>!existingIds.has(r.id));
+      return{...i,records:[...i.records,...toRestore]};
+    }));
     setUndoStack(null);clearTimeout(undoRef.current);showToast("Restored!");
   };
 
   const toggleSelect=(id)=>setSelected(s=>{const n=new Set(s);n.has(id)?n.delete(id):n.add(id);return n;});
-  const selectAll=()=>setSelected(s=>s.size===display.length?new Set():new Set(display.map(r=>r.id)));
+  const displayIds=useMemo(()=>new Set(display.map(r=>r.id)),[display]);
+  const allDisplaySelected=display.length>0&&display.every(r=>selected.has(r.id));
+  const selectAll=()=>setSelected(()=>allDisplaySelected?new Set():new Set(display.map(r=>r.id)));
 
   const download=(recs,name,fmt="xls")=>{
     if(!recs?.length){showToast("No records","error");return;}
@@ -463,7 +475,13 @@ function App(){
     const a=document.createElement("a");a.href="data:application/vnd.ms-excel;charset=utf-8,"+encodeURIComponent(xml);a.download=`${name||"cms"}.xls`;a.click();showToast("Downloaded!");
   };
 
-  const duplicateRecord=(rec)=>{upd(r=>[...r,{...rec,id:uid()}]);showToast("Duplicated!");};
+  const duplicateRecord=(rec)=>{
+    const baseName=(rec.traineeName||"").replace(/ \(COPY ?[\d]*\)$/i,"").trim();
+    const copies=records.filter(r=>r.traineeName.startsWith(baseName+" (COPY")).length;
+    const newName=`${baseName} (COPY${copies>0?" "+(copies+1):""})`; 
+    upd(r=>[...r,{...rec,id:uid(),traineeName:newName.toUpperCase()}]);
+    showToast("Duplicated!");
+  };
 
   const stats=useMemo(()=>{
     const n=display.length;if(!n)return null;
@@ -522,7 +540,7 @@ function App(){
             </div>
           ))}
           {closed.map(i=>(
-            <button key={i.id} onClick={()=>{setView("history");setHistId(i.id);setStatus(null);setHistSearch("");setSelected(new Set());setSortKey(null);}}
+            <button key={i.id} onClick={()=>{setView("history");setHistId(i.id);setStatus(null);setHistSearch("");setSelected(new Set());setSortKey(null);setDateFrom("");setDateTo("");}}
               style={{padding:"4px 12px",borderRadius:20,border:"2px solid #fbbf24",fontSize:11,fontWeight:700,cursor:"pointer",background:view==="history"&&histId===i.id?"#fbbf24":"transparent",color:view==="history"&&histId===i.id?"#1e293b":"#fde68a"}}>🔒 {i.name}</button>
           ))}
         </div>
@@ -609,7 +627,7 @@ function App(){
       <div style={{background:"#fff",borderRadius:12,border:"2px solid #a5b4fc",overflowX:"auto"}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:1300}}>
           <thead><tr>
-            {!isHist&&<th style={{...TH,cursor:"default"}}><input type="checkbox" checked={selected.size===display.length&&display.length>0} onChange={selectAll} style={{cursor:"pointer"}}/></th>}
+            {!isHist&&<th style={{...TH,cursor:"default"}}><input type="checkbox" checked={allDisplaySelected} onChange={selectAll} style={{cursor:"pointer"}}/></th>}
             <th style={{...TH,cursor:"default"}}>S NO</th>
             {COLS.map(c=><th key={c.key} style={TH} onClick={()=>toggleSort(c.key)}>{c.label}{sortArrow(c.key)}</th>)}
             {!isHist&&<th style={{...TH,cursor:"default"}}>ACTIONS</th>}
