@@ -54,6 +54,29 @@ const loadState=()=>{try{const r=localStorage.getItem(STORAGE_KEY);return r?JSON
 const saveState=(invs,activeId)=>{try{localStorage.setItem(STORAGE_KEY,JSON.stringify({invs,activeId}));}catch{}};
 let _uid=Date.now();
 const uid=()=>String(++_uid);
+
+// Normalize any date value from Google Sheets into YYYY-MM-DD (local, no timezone shift)
+const normalizeDate=v=>{
+  if(!v)return"";
+  const s=String(v).trim();
+  // Already clean YYYY-MM-DD
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s;
+  // ISO with time e.g. "2026-03-28T00:00:00.000Z" — strip time, use date part directly
+  if(/^\d{4}-\d{2}-\d{2}T/.test(s))return s.slice(0,10);
+  // DD-MM-YYYY or DD/MM/YYYY
+  const dmy=/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/.exec(s);
+  if(dmy)return`${dmy[3]}-${dmy[2].padStart(2,"0")}-${dmy[1].padStart(2,"0")}`;
+  // Google Sheets serial number (days since Dec 30 1899)
+  if(/^\d+(\.\d+)?$/.test(s)){
+    const serial=Math.floor(parseFloat(s));
+    const d=new Date(Date.UTC(1899,11,30)+serial*86400000);
+    return`${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
+  }
+  // Fallback: parse and extract local date parts
+  const dt=new Date(s);
+  if(!isNaN(dt))return`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
+  return s;
+};
 const scriptCall=async(payload)=>{
   const url=SCRIPT_URL+"?payload="+encodeURIComponent(JSON.stringify(payload));
   const res=await fetch(url,{redirect:"follow"});
@@ -370,7 +393,7 @@ function App(){
       if(rows.length<2){setStatus({msg:`No data in "${currentInv.name}"`,ok:false});setSyncing(false);return;}
       const header=rows[0].map(h=>String(h).toLowerCase().replace(/\s+/g,""));
       const colMap=COLS.map(c=>header.findIndex(h=>h===c.key.toLowerCase()||h===c.label.toLowerCase().replace(/\s+/g,"")));
-      const imported=rows.slice(1).map(row=>{const rec={id:uid()};COLS.forEach((c,ci)=>{rec[c.key]=colMap[ci]>=0?String(row[colMap[ci]]||""):"";});return rec;}).filter(r=>r.bunkName||r.traineeName);
+      const imported=rows.slice(1).map(row=>{const rec={id:uid()};COLS.forEach((c,ci)=>{let v=colMap[ci]>=0?String(row[colMap[ci]]||""):"";if(c.type==="date"&&v){v=normalizeDate(v);}rec[c.key]=v;});return rec;}).filter(r=>r.bunkName||r.traineeName);
       setInvs(p=>p.map(i=>i.id===currentInv.id?{...i,records:imported}:i));
       setStatus({msg:`✓ ${imported.length} records pulled!`,ok:true});showToast("Pulled!");
     }catch(e){setStatus({msg:"Pull failed: "+e.message,ok:false});}
@@ -390,7 +413,7 @@ function App(){
           if(!rows||rows.length<2)continue;
           const header=rows[0].map(h=>String(h).toLowerCase().replace(/\s+/g,""));
           const colMap=COLS.map(c=>header.findIndex(h=>h===c.key.toLowerCase()||h===c.label.toLowerCase().replace(/\s+/g,"")));
-          const imported=rows.slice(1).map(row=>{const rec={id:uid()};COLS.forEach((c,ci)=>{rec[c.key]=colMap[ci]>=0?String(row[colMap[ci]]||""):"";});return rec;}).filter(r=>r.bunkName||r.traineeName);
+          const imported=rows.slice(1).map(row=>{const rec={id:uid()};COLS.forEach((c,ci)=>{let v=colMap[ci]>=0?String(row[colMap[ci]]||""):"";if(c.type==="date"&&v){v=normalizeDate(v);}rec[c.key]=v;});return rec;}).filter(r=>r.bunkName||r.traineeName);
           total+=imported.length;
           const ex=updated.find(i=>i.name.toUpperCase()===sheetName.toUpperCase());
           if(ex){updated=updated.map(i=>i.name.toUpperCase()===sheetName.toUpperCase()?{...i,records:imported}:i);}
