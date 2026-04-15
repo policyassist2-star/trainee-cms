@@ -7,7 +7,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
-<!-- SheetJS for Excel/CSV parsing -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;text-transform:uppercase;}
@@ -20,10 +19,16 @@ input,button,select{text-transform:uppercase;}
 @keyframes fadeIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
 .fade-in{animation:fadeIn .18s ease}
 .inline-input{width:100%;padding:3px 5px;border:1.5px solid #6366f1;border-radius:4px;font-size:11px;outline:none;background:#fff;font-family:Inter,sans-serif;text-transform:uppercase;}
-/* File upload drag area */
 .drop-zone{border:2.5px dashed #a5b4fc;border-radius:12px;padding:28px 20px;text-align:center;cursor:pointer;transition:all .2s;background:#f8f9ff;}
 .drop-zone:hover,.drop-zone.drag-over{border-color:#6366f1;background:#ede9fe;}
 .drop-zone input[type=file]{display:none;}
+/* Bunk dropdown styles */
+.bunk-dropdown-wrap{position:relative;width:100%;}
+.bunk-dropdown-list{position:absolute;top:calc(100% + 2px);left:0;right:0;background:#fff;border:2px solid #6366f1;border-radius:8px;z-index:9999;max-height:220px;overflow-y:auto;box-shadow:0 8px 24px rgba(99,102,241,0.18);}
+.bunk-dropdown-list .bunk-opt{padding:7px 12px;cursor:pointer;font-size:12px;color:#374151;border-bottom:1px solid #e0e7ff;transition:background .1s;}
+.bunk-dropdown-list .bunk-opt:hover,.bunk-dropdown-list .bunk-opt.selected{background:#eef2ff;color:#3730a3;font-weight:700;}
+.bunk-dropdown-list .bunk-opt:last-child{border-bottom:none;}
+.bunk-search-input{width:100%;padding:7px 10px;border:none;border-bottom:2px solid #e0e7ff;font-size:12px;outline:none;background:#f8f9ff;font-family:Inter,sans-serif;text-transform:uppercase;position:sticky;top:0;z-index:1;}
 </style>
 </head>
 <body>
@@ -33,6 +38,20 @@ const {useState,useRef,useEffect,useMemo,useCallback}=React;
 
 const SCRIPT_URL="https://script.google.com/macros/s/AKfycbyLkU-oaFpujlL9WyMosChY8AWfv58yrkjo2FYo9VSLUbXvwiNTRFxr3eFe0cB1dnfEPw/exec";
 const SERVICE_CHARGE_RATE=165;
+
+// ── 50 Bunk Names ─────────────────────────────────────────────
+const BUNK_NAMES=[
+  "BUNK 01","BUNK 02","BUNK 03","BUNK 04","BUNK 05",
+  "BUNK 06","BUNK 07","BUNK 08","BUNK 09","BUNK 10",
+  "BUNK 11","BUNK 12","BUNK 13","BUNK 14","BUNK 15",
+  "BUNK 16","BUNK 17","BUNK 18","BUNK 19","BUNK 20",
+  "BUNK 21","BUNK 22","BUNK 23","BUNK 24","BUNK 25",
+  "BUNK 26","BUNK 27","BUNK 28","BUNK 29","BUNK 30",
+  "BUNK 31","BUNK 32","BUNK 33","BUNK 34","BUNK 35",
+  "BUNK 36","BUNK 37","BUNK 38","BUNK 39","BUNK 40",
+  "BUNK 41","BUNK 42","BUNK 43","BUNK 44","BUNK 45",
+  "BUNK 46","BUNK 47","BUNK 48","BUNK 49","BUNK 50",
+];
 
 const COLS=[
   {key:"bunkName",label:"Bunk Name"},
@@ -51,7 +70,7 @@ const COLS=[
   {key:"toDate",label:"To Date",type:"date"},
   {key:"receivedByCash",label:"Received By Cash"},
   {key:"receivedByGPay",label:"Received By G Pay"},
-  {key:"remark",label:"Remark"},  // ← NEW COLUMN
+  {key:"remark",label:"Remark"},
 ];
 const NUM_COLS=COLS.filter(c=>c.type==="number").map(c=>c.key);
 const STORAGE_KEY="trainee_cms_v4";
@@ -92,7 +111,6 @@ const toCSV=(recs)=>{
   return [COLS.map(c=>esc(c.label)).join(","),...recs.map(r=>COLS.map(c=>esc(r[c.key]||"")).join(","))].join("\n");
 };
 
-// ── Parse uploaded file (Excel/CSV) into records ──────────────
 const parseUploadedFile=(file)=>new Promise((resolve,reject)=>{
   const reader=new FileReader();
   const ext=file.name.split(".").pop().toLowerCase();
@@ -102,7 +120,6 @@ const parseUploadedFile=(file)=>new Promise((resolve,reject)=>{
       if(ext==="csv"){
         const text=e.target.result;
         rows=text.trim().split(/\r?\n/).map(line=>{
-          // Simple CSV parser (handles quoted fields)
           const cells=[];let cur="",inQ=false;
           for(let i=0;i<line.length;i++){
             const ch=line[i];
@@ -119,13 +136,11 @@ const parseUploadedFile=(file)=>new Promise((resolve,reject)=>{
         rows=XLSX.utils.sheet_to_json(ws,{header:1,raw:false,dateNF:"YYYY-MM-DD"});
       }
       if(!rows.length){reject(new Error("Empty file"));return;}
-      // Map header row to COLS keys
       const header=rows[0].map(h=>String(h||"").toLowerCase().replace(/[\s_]/g,""));
       const colMap=COLS.map(c=>{
         const key=c.key.toLowerCase();
         const label=c.label.toLowerCase().replace(/\s/g,"");
         let idx=header.findIndex(h=>h===key||h===label);
-        // Fuzzy match: check if header contains key or vice versa
         if(idx<0)idx=header.findIndex(h=>h.includes(key)||key.includes(h));
         return idx;
       });
@@ -146,11 +161,130 @@ const parseUploadedFile=(file)=>new Promise((resolve,reject)=>{
   else reader.readAsBinaryString(file);
 });
 
+// ── Bunk Name Dropdown with Search ────────────────────────────
+function BunkNameDropdown({value,onChange}){
+  const [open,setOpen]=useState(false);
+  const [search,setSearch]=useState("");
+  const wrapRef=useRef();
+  const searchRef=useRef();
+
+  useEffect(()=>{
+    if(open&&searchRef.current)searchRef.current.focus();
+  },[open]);
+
+  useEffect(()=>{
+    const handler=(e)=>{
+      if(wrapRef.current&&!wrapRef.current.contains(e.target))setOpen(false);
+    };
+    document.addEventListener("mousedown",handler);
+    return()=>document.removeEventListener("mousedown",handler);
+  },[]);
+
+  const filtered=useMemo(()=>{
+    if(!search)return BUNK_NAMES;
+    const q=search.toLowerCase();
+    return BUNK_NAMES.filter(b=>b.toLowerCase().includes(q));
+  },[search]);
+
+  const select=(name)=>{
+    onChange(name);
+    setOpen(false);
+    setSearch("");
+  };
+
+  return(
+    <div className="bunk-dropdown-wrap" ref={wrapRef}>
+      <div onClick={()=>setOpen(o=>!o)} style={{
+        padding:"6px 8px",borderRadius:6,border:`1.5px solid ${open?"#6366f1":"#c7d2fe"}`,
+        fontSize:12,background:"#fff",cursor:"pointer",display:"flex",justifyContent:"space-between",
+        alignItems:"center",userSelect:"none",minHeight:32,color:value?"#1d4ed8":"#9ca3af",fontWeight:value?700:400
+      }}>
+        <span>{value||"SELECT BUNK NAME..."}</span>
+        <span style={{fontSize:10,color:"#6366f1",marginLeft:6}}>{open?"▲":"▼"}</span>
+      </div>
+      {open&&(
+        <div className="bunk-dropdown-list">
+          <input
+            ref={searchRef}
+            className="bunk-search-input"
+            placeholder="🔍 SEARCH BUNK..."
+            value={search}
+            onChange={e=>setSearch(e.target.value.toUpperCase())}
+            onClick={e=>e.stopPropagation()}
+          />
+          {filtered.length===0&&(
+            <div style={{padding:"10px 12px",color:"#9ca3af",fontSize:12,textAlign:"center"}}>NO MATCH</div>
+          )}
+          {filtered.map(b=>(
+            <div key={b} className={`bunk-opt${value===b?" selected":""}`} onClick={()=>select(b)}>{b}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Inline Bunk Name Dropdown for table ───────────────────────
+function InlineBunkDropdown({value,onSave}){
+  const [editing,setEditing]=useState(false);
+  const [val,setVal]=useState(value||"");
+  const [search,setSearch]=useState("");
+  const wrapRef=useRef();
+  const searchRef=useRef();
+
+  useEffect(()=>{if(editing&&searchRef.current)searchRef.current.focus();},[editing]);
+  useEffect(()=>{
+    const handler=(e)=>{if(wrapRef.current&&!wrapRef.current.contains(e.target)){setEditing(false);setSearch("");}};
+    document.addEventListener("mousedown",handler);
+    return()=>document.removeEventListener("mousedown",handler);
+  },[]);
+
+  const filtered=useMemo(()=>{
+    if(!search)return BUNK_NAMES;
+    const q=search.toLowerCase();
+    return BUNK_NAMES.filter(b=>b.toLowerCase().includes(q));
+  },[search]);
+
+  const select=(name)=>{setVal(name);onSave("bunkName",name);setEditing(false);setSearch("");};
+
+  if(!editing){
+    return(
+      <span onClick={()=>{setVal(value||"");setEditing(true);setSearch("");}} title="Click to change bunk"
+        style={{cursor:"pointer",display:"block",minWidth:40,paddingBottom:1,borderBottom:"1px dashed transparent",transition:"border-color .15s"}}
+        onMouseEnter={e=>e.currentTarget.style.borderBottomColor="#a5b4fc"}
+        onMouseLeave={e=>e.currentTarget.style.borderBottomColor="transparent"}>
+        {value||"—"}
+      </span>
+    );
+  }
+
+  return(
+    <div ref={wrapRef} style={{position:"relative",minWidth:120}}>
+      <input className="bunk-search-input" ref={searchRef} placeholder="🔍 SEARCH..."
+        value={search} onChange={e=>setSearch(e.target.value.toUpperCase())}
+        style={{width:"100%",padding:"3px 6px",border:"1.5px solid #6366f1",borderRadius:4,fontSize:11,outline:"none",background:"#fff"}}/>
+      <div style={{position:"absolute",top:"100%",left:0,right:0,background:"#fff",border:"1.5px solid #6366f1",borderRadius:6,zIndex:9999,maxHeight:160,overflowY:"auto",boxShadow:"0 6px 18px rgba(99,102,241,0.2)"}}>
+        {filtered.map(b=>(
+          <div key={b} style={{padding:"5px 9px",cursor:"pointer",fontSize:11,borderBottom:"1px solid #e0e7ff",background:val===b?"#eef2ff":"#fff",color:val===b?"#3730a3":"#374151",fontWeight:val===b?700:400}}
+            onClick={()=>select(b)} onMouseEnter={e=>e.currentTarget.style.background="#f0f0ff"} onMouseLeave={e=>e.currentTarget.style.background=val===b?"#eef2ff":"#fff"}>{b}</div>
+        ))}
+        {filtered.length===0&&<div style={{padding:"6px 9px",color:"#9ca3af",fontSize:11}}>NO MATCH</div>}
+      </div>
+    </div>
+  );
+}
+
 // ── Inline Cell Editor ─────────────────────────────────────────
 function InlineCell({rec,col,onSave}){
   const [editing,setEditing]=useState(false);
   const [val,setVal]=useState(rec[col.key]||"");
   const inRef=useRef();
+
+  // Bunk Name uses its own dropdown component
+  if(col.key==="bunkName"){
+    return <InlineBunkDropdown value={rec.bunkName} onSave={onSave}/>;
+  }
+
   useEffect(()=>{if(editing&&inRef.current)inRef.current.focus();},[editing]);
   const commit=()=>{
     onSave(col.key,col.type==="number"||col.type==="date"?val:val.toUpperCase());
@@ -269,34 +403,19 @@ function FileUploadModal({onClose,onImport}){
   const [preview,setPreview]=useState(null);
   const [loading,setLoading]=useState(false);
   const [error,setError]=useState(null);
-  const [mode,setMode]=useState("replace"); // "replace" | "append"
+  const [mode,setMode]=useState("replace");
   const fileRef=useRef();
 
   const processFile=async(f)=>{
     setFile(f);setError(null);setPreview(null);setLoading(true);
-    try{
-      const recs=await parseUploadedFile(f);
-      setPreview(recs);
-    }catch(e){setError(e.message);}
+    try{const recs=await parseUploadedFile(f);setPreview(recs);}
+    catch(e){setError(e.message);}
     setLoading(false);
   };
 
-  const handleDrop=e=>{
-    e.preventDefault();setDragging(false);
-    const f=e.dataTransfer.files[0];
-    if(f)processFile(f);
-  };
-
-  const handleChange=e=>{
-    const f=e.target.files[0];
-    if(f)processFile(f);
-  };
-
-  const doImport=()=>{
-    if(!preview?.length)return;
-    onImport(preview,mode);
-    onClose();
-  };
+  const handleDrop=e=>{e.preventDefault();setDragging(false);const f=e.dataTransfer.files[0];if(f)processFile(f);};
+  const handleChange=e=>{const f=e.target.files[0];if(f)processFile(f);};
+  const doImport=()=>{if(!preview?.length)return;onImport(preview,mode);onClose();};
 
   const OV={position:"fixed",inset:0,background:"rgba(30,27,75,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:16};
   const ext=file?.name?.split(".").pop().toLowerCase();
@@ -310,13 +429,9 @@ function FileUploadModal({onClose,onImport}){
           <div style={{fontSize:16,fontWeight:800,color:"#3730a3"}}>📂 IMPORT FROM FILE</div>
           <button onClick={onClose} style={{background:"none",border:"2px solid #e2e8f0",borderRadius:6,fontSize:16,cursor:"pointer",color:"#6b7280",width:32,height:32}}>✕</button>
         </div>
-
-        {/* Supported formats */}
         <div style={{background:"#eff6ff",border:"1.5px solid #93c5fd",borderRadius:8,padding:"8px 12px",marginBottom:14,fontSize:11,color:"#1e40af",fontWeight:700}}>
           📌 SUPPORTED: <span style={{color:"#059669"}}>EXCEL (.XLSX, .XLS)</span> &amp; <span style={{color:"#d97706"}}>CSV (.CSV)</span> — FIRST ROW MUST BE HEADERS
         </div>
-
-        {/* Drop Zone */}
         <div className={`drop-zone${dragging?" drag-over":""}`}
           onDragOver={e=>{e.preventDefault();setDragging(true);}}
           onDragLeave={()=>setDragging(false)}
@@ -324,85 +439,39 @@ function FileUploadModal({onClose,onImport}){
           onClick={()=>fileRef.current?.click()}>
           <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleChange}/>
           {file?(
-            <div>
-              <div style={{fontSize:32}}>{fileIcon}</div>
-              <div style={{fontWeight:700,color:"#3730a3",marginTop:6,fontSize:13}}>{file.name}</div>
-              <div style={{fontSize:11,color:"#6b7280",marginTop:2}}>{(file.size/1024).toFixed(1)} KB</div>
-            </div>
+            <div><div style={{fontSize:32}}>{fileIcon}</div><div style={{fontWeight:700,color:"#3730a3",marginTop:6,fontSize:13}}>{file.name}</div><div style={{fontSize:11,color:"#6b7280",marginTop:2}}>{(file.size/1024).toFixed(1)} KB</div></div>
           ):(
-            <div>
-              <div style={{fontSize:36,marginBottom:6}}>⬆️</div>
-              <div style={{fontWeight:700,color:"#4338ca",fontSize:13}}>DRAG & DROP OR CLICK TO BROWSE</div>
-              <div style={{fontSize:11,color:"#9ca3af",marginTop:4}}>EXCEL OR CSV FILES ONLY</div>
-            </div>
+            <div><div style={{fontSize:36,marginBottom:6}}>⬆️</div><div style={{fontWeight:700,color:"#4338ca",fontSize:13}}>DRAG & DROP OR CLICK TO BROWSE</div><div style={{fontSize:11,color:"#9ca3af",marginTop:4}}>EXCEL OR CSV FILES ONLY</div></div>
           )}
         </div>
-
-        {/* Loading */}
-        {loading&&<div style={{textAlign:"center",padding:"14px 0",color:"#6366f1",fontWeight:700,fontSize:13}}>
-          <span className="spin" style={{display:"inline-block",marginRight:6}}>⟳</span> PARSING FILE...
-        </div>}
-
-        {/* Error */}
-        {error&&<div style={{background:"#fee2e2",border:"1.5px solid #ef4444",borderRadius:8,padding:"10px 14px",marginTop:12,fontSize:12,color:"#dc2626",fontWeight:700}}>
-          ❌ {error}
-        </div>}
-
-        {/* Preview */}
+        {loading&&<div style={{textAlign:"center",padding:"14px 0",color:"#6366f1",fontWeight:700,fontSize:13}}><span className="spin" style={{display:"inline-block",marginRight:6}}>⟳</span> PARSING FILE...</div>}
+        {error&&<div style={{background:"#fee2e2",border:"1.5px solid #ef4444",borderRadius:8,padding:"10px 14px",marginTop:12,fontSize:12,color:"#dc2626",fontWeight:700}}>❌ {error}</div>}
         {preview&&!loading&&(
           <div style={{marginTop:14}}>
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-              <div style={{fontWeight:800,color:"#3730a3",fontSize:13}}>
-                ✅ {preview.length} RECORD{preview.length!==1?"S":""} FOUND
-              </div>
-              {/* Import mode */}
+              <div style={{fontWeight:800,color:"#3730a3",fontSize:13}}>✅ {preview.length} RECORD{preview.length!==1?"S":""} FOUND</div>
               <div style={{display:"flex",gap:4}}>
                 {[["replace","🔄 REPLACE ALL"],["append","➕ APPEND"]].map(([v,l])=>(
-                  <button key={v} onClick={()=>setMode(v)} style={{padding:"4px 10px",borderRadius:6,border:`2px solid ${mode===v?"#6366f1":"#c7d2fe"}`,background:mode===v?"#6366f1":"#fff",color:mode===v?"#fff":"#6366f1",fontSize:10,cursor:"pointer",fontWeight:700}}>
-                    {l}
-                  </button>
+                  <button key={v} onClick={()=>setMode(v)} style={{padding:"4px 10px",borderRadius:6,border:`2px solid ${mode===v?"#6366f1":"#c7d2fe"}`,background:mode===v?"#6366f1":"#fff",color:mode===v?"#fff":"#6366f1",fontSize:10,cursor:"pointer",fontWeight:700}}>{l}</button>
                 ))}
               </div>
             </div>
-            {/* Preview table */}
             <div style={{overflowX:"auto",border:"1.5px solid #c7d2fe",borderRadius:8,maxHeight:180}}>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:10,minWidth:400}}>
-                <thead>
-                  <tr style={{background:"#eef2ff",position:"sticky",top:0}}>
-                    {["#","BUNK NAME","TRAINEE NAME","POLICY","SERVICE CHARGE","REMARK"].map(h=>(
-                      <th key={h} style={{padding:"5px 8px",textAlign:"left",color:"#4338ca",fontWeight:700,borderBottom:"1.5px solid #c7d2fe",whiteSpace:"nowrap"}}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
+                <thead><tr style={{background:"#eef2ff",position:"sticky",top:0}}>{["#","BUNK NAME","TRAINEE NAME","POLICY","SERVICE CHARGE","REMARK"].map(h=>(<th key={h} style={{padding:"5px 8px",textAlign:"left",color:"#4338ca",fontWeight:700,borderBottom:"1.5px solid #c7d2fe",whiteSpace:"nowrap"}}>{h}</th>))}</tr></thead>
                 <tbody>
-                  {preview.slice(0,8).map((r,i)=>(
-                    <tr key={r.id} style={{background:i%2===0?"#fff":"#f8f9ff"}}>
-                      <td style={{padding:"4px 8px",color:"#6366f1",fontWeight:700}}>{i+1}</td>
-                      <td style={{padding:"4px 8px"}}>{r.bunkName||"—"}</td>
-                      <td style={{padding:"4px 8px"}}>{r.traineeName||"—"}</td>
-                      <td style={{padding:"4px 8px"}}>{r.policyCount||"—"}</td>
-                      <td style={{padding:"4px 8px"}}>{r.serviceCharge||"—"}</td>
-                      <td style={{padding:"4px 8px",color:"#7c3aed",fontStyle:"italic"}}>{r.remark||"—"}</td>
-                    </tr>
-                  ))}
+                  {preview.slice(0,8).map((r,i)=>(<tr key={r.id} style={{background:i%2===0?"#fff":"#f8f9ff"}}><td style={{padding:"4px 8px",color:"#6366f1",fontWeight:700}}>{i+1}</td><td style={{padding:"4px 8px"}}>{r.bunkName||"—"}</td><td style={{padding:"4px 8px"}}>{r.traineeName||"—"}</td><td style={{padding:"4px 8px"}}>{r.policyCount||"—"}</td><td style={{padding:"4px 8px"}}>{r.serviceCharge||"—"}</td><td style={{padding:"4px 8px",color:"#7c3aed",fontStyle:"italic"}}>{r.remark||"—"}</td></tr>))}
                   {preview.length>8&&<tr><td colSpan={6} style={{padding:"4px 8px",color:"#9ca3af",fontStyle:"italic",textAlign:"center"}}>... AND {preview.length-8} MORE RECORDS</td></tr>}
                 </tbody>
               </table>
             </div>
-            {mode==="replace"&&<div style={{background:"#fef3c7",border:"1.5px solid #f59e0b",borderRadius:6,padding:"6px 10px",marginTop:8,fontSize:11,color:"#92400e",fontWeight:700}}>
-              ⚠ REPLACE MODE: EXISTING RECORDS WILL BE OVERWRITTEN
-            </div>}
-            {mode==="append"&&<div style={{background:"#f0fdf4",border:"1.5px solid #86efac",borderRadius:6,padding:"6px 10px",marginTop:8,fontSize:11,color:"#15803d",fontWeight:700}}>
-              ➕ APPEND MODE: RECORDS WILL BE ADDED TO EXISTING DATA
-            </div>}
+            {mode==="replace"&&<div style={{background:"#fef3c7",border:"1.5px solid #f59e0b",borderRadius:6,padding:"6px 10px",marginTop:8,fontSize:11,color:"#92400e",fontWeight:700}}>⚠ REPLACE MODE: EXISTING RECORDS WILL BE OVERWRITTEN</div>}
+            {mode==="append"&&<div style={{background:"#f0fdf4",border:"1.5px solid #86efac",borderRadius:6,padding:"6px 10px",marginTop:8,fontSize:11,color:"#15803d",fontWeight:700}}>➕ APPEND MODE: RECORDS WILL BE ADDED TO EXISTING DATA</div>}
           </div>
         )}
-
         <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:16,paddingTop:12,borderTop:"2px solid #e0e7ff"}}>
           <button onClick={onClose} style={{padding:"8px 14px",borderRadius:8,border:"2px solid #6b7280",background:"transparent",color:"#6b7280",fontWeight:700,fontSize:12,cursor:"pointer"}}>CANCEL</button>
-          <button onClick={doImport} disabled={!preview||loading} style={{padding:"8px 16px",borderRadius:8,border:"none",background:preview&&!loading?"#6366f1":"#c7d2fe",color:"#fff",fontWeight:700,fontSize:12,cursor:preview&&!loading?"pointer":"not-allowed"}}>
-            📂 IMPORT {preview?`${preview.length} RECORDS`:""}
-          </button>
+          <button onClick={doImport} disabled={!preview||loading} style={{padding:"8px 16px",borderRadius:8,border:"none",background:preview&&!loading?"#6366f1":"#c7d2fe",color:"#fff",fontWeight:700,fontSize:12,cursor:preview&&!loading?"pointer":"not-allowed"}}>📂 IMPORT {preview?`${preview.length} RECORDS`:""}</button>
         </div>
       </div>
     </div>
@@ -419,7 +488,6 @@ function App(){
   const [editId,setEditId]=useState(null);
   const [form,setForm]=useState(EMPTY);
   const [showForm,setShowForm]=useState(false);
-  const [dupWarn,setDupWarn]=useState(null);
   const [delId,setDelId]=useState(null);
   const [toast,setToast]=useState(null);
   const [showClose,setShowClose]=useState(false);
@@ -438,7 +506,8 @@ function App(){
   const [renameName,setRenameName]=useState("");
   const [dateFrom,setDateFrom]=useState("");
   const [dateTo,setDateTo]=useState("");
-  const [showUpload,setShowUpload]=useState(false); // ← NEW
+  const [showUpload,setShowUpload]=useState(false);
+  const [showPendingBunks,setShowPendingBunks]=useState(false);
 
   const tRef=useRef();const undoRef=useRef();
   useEffect(()=>{saveState(invs,activeId);},[invs,activeId]);
@@ -494,7 +563,8 @@ function App(){
   const upd=(fn)=>setInvs(p=>p.map(i=>i.id===activeId?{...i,records:fn(i.records)}:i));
   const toggleSort=(key)=>{if(sortKey===key){setSortDir(d=>d==="asc"?"desc":"asc");}else{setSortKey(key);setSortDir("asc");}};
 
-  const checkDup=(name,excludeId=null)=>!!name&&records.some(r=>r.id!==excludeId&&r.traineeName.toUpperCase()===name.trim().toUpperCase());
+  // ── DUPLICATE CHECK REMOVED — trainee names can repeat ────
+  // No checkDup function, no duplicate warning
 
   const handleFormChange=(key,value)=>{
     setForm(f=>{
@@ -505,9 +575,6 @@ function App(){
       }
       return next;
     });
-    if(key==="traineeName"){
-      setDupWarn(checkDup(value,editId)?`⚠ "${value.toUpperCase()}" ALREADY EXISTS IN THIS CMS!`:null);
-    }
   };
 
   const inlineSave=(recId,key,value)=>{
@@ -516,10 +583,7 @@ function App(){
       return {...i,records:i.records.map(r=>{
         if(r.id!==recId)return r;
         const updr={...r,[key]:value};
-        if(key==="policyCount"){
-          const pc=parseFloat(value)||0;
-          updr.serviceCharge=pc>0?String(Math.round(pc*SERVICE_CHARGE_RATE)):"";
-        }
+        if(key==="policyCount"){const pc=parseFloat(value)||0;updr.serviceCharge=pc>0?String(Math.round(pc*SERVICE_CHARGE_RATE)):"";}
         return updr;
       })};
     }));
@@ -527,21 +591,21 @@ function App(){
 
   const save=()=>{
     if(!form.bunkName||!form.traineeName){showToast("Bunk Name & Trainee Name required","error");return;}
-    if(editId===null&&checkDup(form.traineeName)){showToast(`⚠ DUPLICATE: ${form.traineeName} already exists!`,"error");return;}
+    // Allow duplicate trainee names — no check here
     if(editId!==null){upd(r=>r.map(x=>x.id===editId?{...form,id:editId}:x));showToast("Updated!");}
     else{upd(r=>[...r,{...form,id:uid()}]);showToast("Added!");}
-    setShowForm(false);setEditId(null);setForm(EMPTY());setDupWarn(null);
+    setShowForm(false);setEditId(null);setForm(EMPTY());
   };
 
   const saveSync=async()=>{
     if(!form.bunkName||!form.traineeName){showToast("Bunk Name & Trainee Name required","error");return;}
-    if(editId===null&&checkDup(form.traineeName)){showToast(`⚠ DUPLICATE: ${form.traineeName} already exists!`,"error");return;}
+    // Allow duplicate trainee names — no check here
     const rec={...form,id:editId!==null?editId:uid()};
     const committedRecords=editId!==null
       ?(active?.records||[]).map(x=>x.id===editId?rec:x)
       :[...(active?.records||[]),rec];
     if(editId!==null){upd(r=>r.map(x=>x.id===editId?rec:x));}else{upd(r=>[...r,rec]);}
-    setShowForm(false);setEditId(null);setForm(EMPTY());setDupWarn(null);
+    setShowForm(false);setEditId(null);setForm(EMPTY());
     try{
       const sheetName=active?.name||"Sheet1";
       const header=COLS.map(c=>c.label.toUpperCase());
@@ -628,15 +692,9 @@ function App(){
     setSyncing(false);
   };
 
-  // ── File Import Handler ──────────────────────────────────────
   const handleFileImport=(importedRecs,mode)=>{
-    if(mode==="replace"){
-      upd(()=>importedRecs);
-      showToast(`📂 Imported ${importedRecs.length} records (replaced)`);
-    } else {
-      upd(existing=>[...existing,...importedRecs]);
-      showToast(`📂 Appended ${importedRecs.length} records`);
-    }
+    if(mode==="replace"){upd(()=>importedRecs);showToast(`📂 Imported ${importedRecs.length} records (replaced)`);}
+    else{upd(existing=>[...existing,...importedRecs]);showToast(`📂 Appended ${importedRecs.length} records`);}
   };
 
   const closeInv=()=>{
@@ -711,21 +769,21 @@ function App(){
   };
 
   const duplicateRecord=(rec)=>{
-    const baseName=(rec.traineeName||"").replace(/ \(COPY ?[\d]*\)$/i,"").trim();
-    const copies=records.filter(r=>r.traineeName.startsWith(baseName+" (COPY")).length;
-    const newName=`${baseName} (COPY${copies>0?" "+(copies+1):""})`; 
-    upd(r=>[...r,{...rec,id:uid(),traineeName:newName.toUpperCase()}]);
+    upd(r=>[...r,{...rec,id:uid()}]);
     showToast("Duplicated!");
   };
 
   const stats=useMemo(()=>{
     const n=display.length;if(!n)return null;
-    const avgPolicy=(display.reduce((s,x)=>s+(parseFloat(x.policyCount)||0),0)/n).toFixed(1);
-    const topBunk=[...display.reduce((m,x)=>{m.set(x.bunkName||"?",(m.get(x.bunkName||"?")||0)+1);return m;},new Map())].sort((a,b)=>b[1]-a[1])[0];
     const pending=display.filter(x=>(parseFloat(x.pendingAmount)||0)>0).length;
     const withRemark=display.filter(x=>x.remark&&x.remark.trim()).length;
-    return{avgPolicy,topBunk:topBunk?topBunk[0]:"—",pending,withRemark};
+    return{pending,withRemark};
   },[display]);
+
+  const pendingBunks=useMemo(()=>{
+    const usedBunks=new Set(records.map(r=>(r.bunkName||"").trim().toUpperCase()).filter(Boolean));
+    return BUNK_NAMES.filter(b=>!usedBunks.has(b.toUpperCase()));
+  },[records]);
 
   const isDateFiltered=!!(dateFrom||dateTo);
   const btn=(bg,color,outline)=>({padding:"8px 14px",borderRadius:8,border:`2px solid ${outline?"#6b7280":bg}`,background:outline?"transparent":bg,color:outline?"#6b7280":color,fontWeight:700,fontSize:12,cursor:"pointer"});
@@ -736,10 +794,8 @@ function App(){
 
   return(
     <div style={{minHeight:"100vh"}}>
-      {/* TOAST */}
       {toast&&<div className="fade-in" style={{position:"fixed",top:16,right:16,zIndex:9999,background:toast.type==="error"?"#ef4444":"#22c55e",color:"#fff",padding:"10px 18px",borderRadius:8,border:"2px solid rgba(255,255,255,0.4)",fontWeight:700,fontSize:13}}>{toast.msg}</div>}
 
-      {/* UNDO BANNER */}
       {undoStack&&<div className="fade-in" style={{position:"fixed",bottom:16,left:"50%",transform:"translateX(-50%)",zIndex:9999,background:"#1e1b4b",color:"#fff",padding:"10px 20px",borderRadius:10,border:"2px solid #6366f1",fontWeight:700,fontSize:13,display:"flex",alignItems:"center",gap:12}}>
         <span>🗑 {undoStack.records.length} record{undoStack.records.length>1?"s":""} deleted</span>
         <button onClick={doUndo} style={{background:"#6366f1",color:"#fff",border:"none",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontWeight:700,fontSize:12}}>↩ UNDO</button>
@@ -757,7 +813,7 @@ function App(){
             </div>
           </div>
           <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-            {!isHist&&<button onClick={()=>{setForm(EMPTY());setEditId(null);setDupWarn(null);setShowForm(true);}} style={btn("#3b82f6","#fff")}>+ ADD</button>}
+            {!isHist&&<button onClick={()=>{setForm(EMPTY());setEditId(null);setShowForm(true);}} style={btn("#3b82f6","#fff")}>+ ADD</button>}
             {!isHist&&<button onClick={()=>setShowUpload(true)} style={btn("#0ea5e9","#fff")}>📂 IMPORT</button>}
             {selected.size>0&&!isHist&&<button onClick={()=>setShowBulkDel(true)} style={btn("#ef4444","#fff")}>🗑 DEL ({selected.size})</button>}
             <div style={{display:"inline-flex"}}>
@@ -783,7 +839,6 @@ function App(){
         </div>
       </div>
 
-      {/* HISTORY BANNER */}
       {isHist&&histInv&&<div style={{background:"#fef3c7",border:"2px solid #f59e0b",borderRadius:10,padding:"9px 14px",marginBottom:12,fontSize:12,color:"#92400e",fontWeight:700,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <span>🔒 CLOSED: {histInv.name} | {histInv.closedAt}</span>
         <div style={{display:"flex",gap:6}}>
@@ -792,7 +847,6 @@ function App(){
         </div>
       </div>}
 
-      {/* SEARCH + DATE FILTER */}
       <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"stretch"}}>
         <div style={{flex:"2 1 200px",border:"2px solid #a5b4fc",borderRadius:10,background:"#fff",display:"flex",alignItems:"center",overflow:"hidden"}}>
           <input placeholder="🔍 SEARCH..." value={isHist?histSearch:search}
@@ -803,11 +857,9 @@ function App(){
         </div>
         <div style={{flex:"3 1 280px",border:`2px solid ${isDateFiltered?"#3b82f6":"#a5b4fc"}`,borderRadius:10,background:"#fff",display:"flex",alignItems:"center",gap:6,padding:"0 10px"}}>
           <span style={{fontSize:11,fontWeight:700,color:"#4338ca",whiteSpace:"nowrap"}}>📅 FROM</span>
-          <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}
-            style={{flex:1,padding:"8px 4px",border:"none",fontSize:12,outline:"none",background:"transparent",minWidth:90}}/>
+          <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)} style={{flex:1,padding:"8px 4px",border:"none",fontSize:12,outline:"none",background:"transparent",minWidth:90}}/>
           <span style={{fontSize:11,fontWeight:700,color:"#4338ca",whiteSpace:"nowrap"}}>TO</span>
-          <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}
-            style={{flex:1,padding:"8px 4px",border:"none",fontSize:12,outline:"none",background:"transparent",minWidth:90}}/>
+          <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)} style={{flex:1,padding:"8px 4px",border:"none",fontSize:12,outline:"none",background:"transparent",minWidth:90}}/>
           {isDateFiltered&&<button onClick={()=>{setDateFrom("");setDateTo("");}} style={{background:"#ef4444",color:"#fff",border:"none",borderRadius:6,padding:"3px 8px",cursor:"pointer",fontSize:11,fontWeight:700,whiteSpace:"nowrap"}}>✕ CLEAR</button>}
         </div>
       </div>
@@ -816,7 +868,6 @@ function App(){
         📅 FILTERED: {dateFrom||"..."} → {dateTo||"..."} | {display.length} RECORD{display.length!==1?"S":""}
       </div>}
 
-      {/* SUMMARY CARDS */}
       <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:14}}>
         {[
           {label:"TOTAL G PAY",key:"gPay",color:"#6366f1",bg:"#ede9fe"},
@@ -845,20 +896,22 @@ function App(){
         </div>
       </div>
 
-      {/* QUICK STATS BAR */}
-      {stats&&display.length>0&&<div style={{background:"#fff",border:"2px solid #c7d2fe",borderRadius:10,padding:"8px 14px",marginBottom:12,display:"flex",gap:12,flexWrap:"wrap",fontSize:11,color:"#4338ca",fontWeight:700}}>
+      {stats&&display.length>0&&<div style={{background:"#fff",border:"2px solid #c7d2fe",borderRadius:10,padding:"8px 14px",marginBottom:12,display:"flex",gap:12,flexWrap:"wrap",fontSize:11,color:"#4338ca",fontWeight:700,alignItems:"center"}}>
         <span>📊 {display.length} RECORDS</span><span>|</span>
         <span style={{color:stats.pending>0?"#f59e0b":"#10b981"}}>⚠ {stats.pending} WITH PENDING</span>
         {stats.withRemark>0&&<><span>|</span><span style={{color:"#7c3aed"}}>💬 {stats.withRemark} WITH REMARK</span></>}
         {selected.size>0&&<><span>|</span><span style={{color:"#ef4444"}}>☑ {selected.size} SELECTED</span></>}
+        {!isHist&&<><span>|</span>
+        <span>🏦 {BUNK_NAMES.length-pendingBunks.length} BUNKS USED</span><span>|</span>
+        <span onClick={()=>setShowPendingBunks(true)} style={{color:pendingBunks.length>0?"#ef4444":"#10b981",cursor:pendingBunks.length>0?"pointer":"default",textDecoration:pendingBunks.length>0?"underline":"none",display:"flex",alignItems:"center",gap:4}}>
+          ⏳ {pendingBunks.length} BUNKS PENDING{pendingBunks.length>0?" 👆":""}
+        </span></>}
       </div>}
 
       {status&&<div style={{marginBottom:12,padding:"9px 14px",borderRadius:10,fontSize:12,fontWeight:700,background:status.ok?"#dcfce7":"#fee2e2",border:`2px solid ${status.ok?"#22c55e":"#ef4444"}`,color:status.ok?"#15803d":"#dc2626"}}>{status.msg}</div>}
 
-      {/* PER-BUNK SUMMARY */}
       <BunkSummary records={display}/>
 
-      {/* TABLE */}
       <div style={{background:"#fff",borderRadius:12,border:"2px solid #a5b4fc",overflowX:"auto"}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:1400}}>
           <thead><tr>
@@ -889,7 +942,7 @@ function App(){
                   </td>
                 ))}
                 {!isHist&&<td style={{...TD,whiteSpace:"nowrap"}}>
-                  <button onClick={()=>{setForm({...r});setEditId(r.id);setDupWarn(null);setShowForm(true);}} style={{padding:"4px 8px",borderRadius:6,border:"1.5px solid #3b82f6",background:"#dbeafe",color:"#1d4ed8",cursor:"pointer",fontSize:11,fontWeight:700}}>✏</button>
+                  <button onClick={()=>{setForm({...r});setEditId(r.id);setShowForm(true);}} style={{padding:"4px 8px",borderRadius:6,border:"1.5px solid #3b82f6",background:"#dbeafe",color:"#1d4ed8",cursor:"pointer",fontSize:11,fontWeight:700}}>✏</button>
                   <button onClick={()=>duplicateRecord(r)} style={{padding:"4px 8px",borderRadius:6,border:"1.5px solid #8b5cf6",background:"#ede9fe",color:"#5b21b6",cursor:"pointer",fontSize:11,fontWeight:700,marginLeft:4}}>⧉</button>
                   <button onClick={()=>setDelId(r.id)} style={{padding:"4px 8px",borderRadius:6,border:"1.5px solid #ef4444",background:"#fee2e2",color:"#dc2626",cursor:"pointer",fontSize:11,fontWeight:700,marginLeft:4}}>🗑</button>
                 </td>}
@@ -910,30 +963,34 @@ function App(){
         <div style={{background:"#fff",borderRadius:14,border:"2px solid #6366f1",padding:20,width:"95%",maxWidth:680,maxHeight:"90vh",overflowY:"auto"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,paddingBottom:12,borderBottom:"2px solid #e0e7ff"}}>
             <div style={{fontSize:16,fontWeight:800}}>{editId?"✏ EDIT RECORD":"➕ NEW RECORD"}</div>
-            <button onClick={()=>{setShowForm(false);setEditId(null);setForm(EMPTY());setDupWarn(null);}} style={{background:"none",border:"2px solid #e2e8f0",borderRadius:6,fontSize:16,cursor:"pointer",color:"#6b7280",width:32,height:32}}>✕</button>
+            <button onClick={()=>{setShowForm(false);setEditId(null);setForm(EMPTY());}} style={{background:"none",border:"2px solid #e2e8f0",borderRadius:6,fontSize:16,cursor:"pointer",color:"#6b7280",width:32,height:32}}>✕</button>
           </div>
 
-          {dupWarn&&<div style={{background:"#fef3c7",border:"2px solid #f59e0b",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:12,fontWeight:700,color:"#92400e"}}>{dupWarn}</div>}
-
           <div style={{background:"#f0fdf4",border:"1.5px solid #86efac",borderRadius:8,padding:"7px 12px",marginBottom:12,fontSize:11,color:"#15803d",fontWeight:700}}>
-            💡 SERVICE CHARGE = POLICY COUNT × ₹{SERVICE_CHARGE_RATE} (AUTO-FILLED)
+            💡 SERVICE CHARGE = POLICY COUNT × ₹{SERVICE_CHARGE_RATE} (AUTO-FILLED) &nbsp;|&nbsp; ✅ DUPLICATE TRAINEE NAMES ALLOWED
           </div>
 
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
             {COLS.map(c=>(
               <div key={c.key} style={{display:"flex",flexDirection:"column",gap:3,
-                border:`1.5px solid ${c.key==="serviceCharge"?"#86efac":c.key==="remark"?"#c4b5fd":"#e0e7ff"}`,
+                border:`1.5px solid ${c.key==="serviceCharge"?"#86efac":c.key==="remark"?"#c4b5fd":c.key==="bunkName"?"#818cf8":"#e0e7ff"}`,
                 borderRadius:8,padding:"8px 10px",
-                background:c.key==="serviceCharge"?"#f0fdf4":c.key==="remark"?"#faf5ff":"#f8faff",
-                gridColumn:c.key==="remark"?"1 / -1":"auto"}}>
-                <label style={{fontSize:10,fontWeight:700,color:c.key==="serviceCharge"?"#15803d":c.key==="remark"?"#7c3aed":"#6366f1"}}>
+                background:c.key==="serviceCharge"?"#f0fdf4":c.key==="remark"?"#faf5ff":c.key==="bunkName"?"#eef2ff":"#f8faff",
+                gridColumn:c.key==="remark"?"1 / -1":"auto",
+                position:"relative",zIndex:c.key==="bunkName"?200:"auto"}}>
+                <label style={{fontSize:10,fontWeight:700,color:c.key==="serviceCharge"?"#15803d":c.key==="remark"?"#7c3aed":c.key==="bunkName"?"#3730a3":"#6366f1"}}>
                   {c.label}
                   {["bunkName","traineeName"].includes(c.key)&&<span style={{color:"#ef4444"}}> *</span>}
                   {c.key==="serviceCharge"&&<span style={{color:"#15803d"}}> ✦ AUTO</span>}
                   {c.key==="remark"&&<span style={{color:"#7c3aed"}}> 💬</span>}
+                  {c.key==="bunkName"&&<span style={{color:"#6366f1"}}> 🏦 ({BUNK_NAMES.length} OPTIONS)</span>}
                 </label>
-                {c.key==="remark"?(
-                  <textarea value={form[c.key]} onChange={e=>handleFormChange(c.key,e.target.value.toUpperCase())}
+
+                {/* ── BUNK NAME uses searchable dropdown ── */}
+                {c.key==="bunkName"?(
+                  <BunkNameDropdown value={form.bunkName} onChange={v=>setForm(f=>({...f,bunkName:v}))}/>
+                ):c.key==="remark"?(
+                  <textarea value={form[c.key]} onChange={e=>setForm(f=>({...f,[c.key]:e.target.value.toUpperCase()}))}
                     placeholder="ENTER ANY REMARKS OR NOTES..."
                     style={{padding:"6px 8px",borderRadius:6,border:"1.5px solid #c4b5fd",fontSize:12,outline:"none",background:"#fff",resize:"vertical",minHeight:60,fontFamily:"Inter,sans-serif",textTransform:"uppercase"}}/>
                 ):(
@@ -950,17 +1007,52 @@ function App(){
             ))}
           </div>
           <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:16,paddingTop:12,borderTop:"2px solid #e0e7ff"}}>
-            <button onClick={()=>{setShowForm(false);setEditId(null);setForm(EMPTY());setDupWarn(null);}} style={btn("transparent","#6b7280",true)}>CANCEL</button>
+            <button onClick={()=>{setShowForm(false);setEditId(null);setForm(EMPTY());}} style={btn("transparent","#6b7280",true)}>CANCEL</button>
             <button onClick={saveSync} style={btn("#22c55e","#fff")}>💾 SAVE + SYNC ↑</button>
             <button onClick={save} style={btn("#3b82f6","#fff")}>💾 SAVE</button>
           </div>
         </div>
       </div>}
 
-      {/* FILE UPLOAD MODAL */}
       {showUpload&&<FileUploadModal onClose={()=>setShowUpload(false)} onImport={handleFileImport}/>}
 
-      {/* CLOSE CONFIRM */}
+      {/* PENDING BUNKS MODAL */}
+      {showPendingBunks&&<div style={{position:"fixed",inset:0,background:"rgba(30,27,75,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:16}}>
+        <div style={{background:"#fff",borderRadius:16,border:"2px solid #ef4444",padding:24,width:"95%",maxWidth:520,maxHeight:"88vh",overflowY:"auto"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,paddingBottom:12,borderBottom:"2px solid #fee2e2"}}>
+            <div style={{fontSize:16,fontWeight:800,color:"#dc2626"}}>⏳ PENDING BUNKS ({pendingBunks.length})</div>
+            <button onClick={()=>setShowPendingBunks(false)} style={{background:"none",border:"2px solid #e2e8f0",borderRadius:6,fontSize:16,cursor:"pointer",color:"#6b7280",width:32,height:32}}>✕</button>
+          </div>
+          <div style={{background:"#fef2f2",border:"1.5px solid #fca5a5",borderRadius:8,padding:"8px 12px",marginBottom:14,fontSize:11,color:"#991b1b",fontWeight:700}}>
+            💡 TAP ANY BUNK NAME TO OPEN ADD RECORD FORM WITH THAT BUNK PRE-FILLED
+          </div>
+          {pendingBunks.length===0?(
+            <div style={{textAlign:"center",padding:28,color:"#10b981",fontWeight:800,fontSize:14}}>🎉 ALL {BUNK_NAMES.length} BUNKS ARE ADDED!</div>
+          ):(
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(130px,1fr))",gap:8}}>
+              {pendingBunks.map(b=>(
+                <button key={b} onClick={()=>{
+                  setShowPendingBunks(false);
+                  setForm({...EMPTY(),bunkName:b});
+                  setEditId(null);
+                  setShowForm(true);
+                }} style={{padding:"10px 8px",borderRadius:9,border:"2px solid #fca5a5",background:"#fff5f5",color:"#dc2626",fontWeight:700,fontSize:12,cursor:"pointer",textAlign:"center",transition:"all .15s"}}
+                  onMouseEnter={e=>{e.currentTarget.style.background="#fee2e2";e.currentTarget.style.borderColor="#ef4444";}}
+                  onMouseLeave={e=>{e.currentTarget.style.background="#fff5f5";e.currentTarget.style.borderColor="#fca5a5";}}>
+                  🏦 {b}
+                </button>
+              ))}
+            </div>
+          )}
+          <div style={{marginTop:16,paddingTop:12,borderTop:"1.5px solid #fee2e2",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{fontSize:11,color:"#9ca3af",fontWeight:700}}>
+              ✅ {BUNK_NAMES.length - pendingBunks.length} / {BUNK_NAMES.length} BUNKS COMPLETED
+            </div>
+            <button onClick={()=>setShowPendingBunks(false)} style={{padding:"7px 16px",borderRadius:8,border:"2px solid #6b7280",background:"transparent",color:"#6b7280",fontWeight:700,fontSize:12,cursor:"pointer"}}>CLOSE</button>
+          </div>
+        </div>
+      </div>}
+
       {showClose&&<div style={OV}><div style={{background:"#fff",borderRadius:14,border:"2px solid #f59e0b",padding:24,maxWidth:340,width:"90%",textAlign:"center"}}>
         <div style={{fontSize:36,marginBottom:8}}>🔒</div>
         <div style={{fontSize:16,fontWeight:800,marginBottom:8}}>CLOSE THIS CMS?</div>
@@ -971,7 +1063,6 @@ function App(){
         </div>
       </div></div>}
 
-      {/* NEW CMS */}
       {showNew&&<div style={OV}><div style={{background:"#fff",borderRadius:14,border:"2px solid #8b5cf6",padding:24,maxWidth:340,width:"90%",textAlign:"center"}}>
         <div style={{fontSize:36,marginBottom:8}}>✨</div>
         <div style={{fontSize:16,fontWeight:800,marginBottom:14}}>NEW CMS</div>
@@ -984,7 +1075,6 @@ function App(){
         </div>
       </div></div>}
 
-      {/* RENAME */}
       {renameId&&<div style={OV}><div style={{background:"#fff",borderRadius:14,border:"2px solid #3b82f6",padding:24,maxWidth:340,width:"90%",textAlign:"center"}}>
         <div style={{fontSize:36,marginBottom:8}}>✎</div>
         <div style={{fontSize:16,fontWeight:800,marginBottom:14}}>RENAME CMS</div>
@@ -997,7 +1087,6 @@ function App(){
         </div>
       </div></div>}
 
-      {/* DELETE */}
       {delId&&<div style={OV}><div style={{background:"#fff",borderRadius:14,border:"2px solid #ef4444",padding:24,maxWidth:320,width:"90%",textAlign:"center"}}>
         <div style={{fontSize:36,marginBottom:8}}>🗑️</div>
         <div style={{fontSize:16,fontWeight:800,marginBottom:8}}>DELETE RECORD?</div>
@@ -1008,7 +1097,6 @@ function App(){
         </div>
       </div></div>}
 
-      {/* BULK DELETE */}
       {showBulkDel&&<div style={OV}><div style={{background:"#fff",borderRadius:14,border:"2px solid #ef4444",padding:24,maxWidth:340,width:"90%",textAlign:"center"}}>
         <div style={{fontSize:36,marginBottom:8}}>🗑️</div>
         <div style={{fontSize:16,fontWeight:800,marginBottom:8}}>DELETE {selected.size} RECORDS?</div>
