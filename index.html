@@ -7,6 +7,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<!-- SheetJS for Excel/CSV parsing -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;text-transform:uppercase;}
 body{font-family:Inter,sans-serif;background:#eef2ff;padding:12px;}
@@ -18,12 +20,16 @@ input,button,select{text-transform:uppercase;}
 @keyframes fadeIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
 .fade-in{animation:fadeIn .18s ease}
 .inline-input{width:100%;padding:3px 5px;border:1.5px solid #6366f1;border-radius:4px;font-size:11px;outline:none;background:#fff;font-family:Inter,sans-serif;text-transform:uppercase;}
+/* File upload drag area */
+.drop-zone{border:2.5px dashed #a5b4fc;border-radius:12px;padding:28px 20px;text-align:center;cursor:pointer;transition:all .2s;background:#f8f9ff;}
+.drop-zone:hover,.drop-zone.drag-over{border-color:#6366f1;background:#ede9fe;}
+.drop-zone input[type=file]{display:none;}
 </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const {useState,useRef,useEffect,useMemo}=React;
+const {useState,useRef,useEffect,useMemo,useCallback}=React;
 
 const SCRIPT_URL="https://script.google.com/macros/s/AKfycbyLkU-oaFpujlL9WyMosChY8AWfv58yrkjo2FYo9VSLUbXvwiNTRFxr3eFe0cB1dnfEPw/exec";
 const SERVICE_CHARGE_RATE=165;
@@ -45,9 +51,10 @@ const COLS=[
   {key:"toDate",label:"To Date",type:"date"},
   {key:"receivedByCash",label:"Received By Cash"},
   {key:"receivedByGPay",label:"Received By G Pay"},
+  {key:"remark",label:"Remark"},  // ← NEW COLUMN
 ];
 const NUM_COLS=COLS.filter(c=>c.type==="number").map(c=>c.key);
-const STORAGE_KEY="trainee_cms_v3";
+const STORAGE_KEY="trainee_cms_v4";
 const EMPTY=()=>Object.fromEntries(COLS.map(c=>[c.key,""]));
 const mkInv=(name,id)=>({id,name,records:[],closedAt:null,createdAt:new Date().toLocaleString()});
 const loadState=()=>{try{const r=localStorage.getItem(STORAGE_KEY);return r?JSON.parse(r):null;}catch{return null;}};
@@ -55,28 +62,23 @@ const saveState=(invs,activeId)=>{try{localStorage.setItem(STORAGE_KEY,JSON.stri
 let _uid=Date.now();
 const uid=()=>String(++_uid);
 
-// Normalize any date value from Google Sheets into YYYY-MM-DD (local, no timezone shift)
 const normalizeDate=v=>{
   if(!v)return"";
   const s=String(v).trim();
-  // Already clean YYYY-MM-DD
   if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s;
-  // ISO with time e.g. "2026-03-28T00:00:00.000Z" — strip time, use date part directly
   if(/^\d{4}-\d{2}-\d{2}T/.test(s))return s.slice(0,10);
-  // DD-MM-YYYY or DD/MM/YYYY
   const dmy=/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/.exec(s);
   if(dmy)return`${dmy[3]}-${dmy[2].padStart(2,"0")}-${dmy[1].padStart(2,"0")}`;
-  // Google Sheets serial number (days since Dec 30 1899)
   if(/^\d+(\.\d+)?$/.test(s)){
     const serial=Math.floor(parseFloat(s));
     const d=new Date(Date.UTC(1899,11,30)+serial*86400000);
     return`${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
   }
-  // Fallback: parse and extract local date parts
   const dt=new Date(s);
   if(!isNaN(dt))return`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
   return s;
 };
+
 const scriptCall=async(payload)=>{
   const url=SCRIPT_URL+"?payload="+encodeURIComponent(JSON.stringify(payload));
   const res=await fetch(url,{redirect:"follow"});
@@ -84,10 +86,65 @@ const scriptCall=async(payload)=>{
   const text=await res.text();
   try{return JSON.parse(text);}catch(e){throw new Error("Bad response: "+text.slice(0,120));}
 };
+
 const toCSV=(recs)=>{
   const esc=v=>'"'+String(v||"").replace(/"/g,'""')+'"';
   return [COLS.map(c=>esc(c.label)).join(","),...recs.map(r=>COLS.map(c=>esc(r[c.key]||"")).join(","))].join("\n");
 };
+
+// ── Parse uploaded file (Excel/CSV) into records ──────────────
+const parseUploadedFile=(file)=>new Promise((resolve,reject)=>{
+  const reader=new FileReader();
+  const ext=file.name.split(".").pop().toLowerCase();
+  reader.onload=e=>{
+    try{
+      let rows=[];
+      if(ext==="csv"){
+        const text=e.target.result;
+        rows=text.trim().split(/\r?\n/).map(line=>{
+          // Simple CSV parser (handles quoted fields)
+          const cells=[];let cur="",inQ=false;
+          for(let i=0;i<line.length;i++){
+            const ch=line[i];
+            if(ch==='"'){inQ=!inQ;}
+            else if(ch===","&&!inQ){cells.push(cur.trim());cur="";}
+            else cur+=ch;
+          }
+          cells.push(cur.trim());
+          return cells;
+        });
+      } else {
+        const wb=XLSX.read(e.target.result,{type:"binary",cellDates:true});
+        const ws=wb.Sheets[wb.SheetNames[0]];
+        rows=XLSX.utils.sheet_to_json(ws,{header:1,raw:false,dateNF:"YYYY-MM-DD"});
+      }
+      if(!rows.length){reject(new Error("Empty file"));return;}
+      // Map header row to COLS keys
+      const header=rows[0].map(h=>String(h||"").toLowerCase().replace(/[\s_]/g,""));
+      const colMap=COLS.map(c=>{
+        const key=c.key.toLowerCase();
+        const label=c.label.toLowerCase().replace(/\s/g,"");
+        let idx=header.findIndex(h=>h===key||h===label);
+        // Fuzzy match: check if header contains key or vice versa
+        if(idx<0)idx=header.findIndex(h=>h.includes(key)||key.includes(h));
+        return idx;
+      });
+      const imported=rows.slice(1).map(row=>{
+        const rec={id:uid()};
+        COLS.forEach((c,ci)=>{
+          let v=colMap[ci]>=0?String(row[colMap[ci]]||""):"";
+          if(c.type==="date"&&v)v=normalizeDate(v);
+          rec[c.key]=v;
+        });
+        return rec;
+      }).filter(r=>r.bunkName||r.traineeName);
+      resolve(imported);
+    }catch(err){reject(err);}
+  };
+  reader.onerror=()=>reject(new Error("Read error"));
+  if(ext==="csv")reader.readAsText(file);
+  else reader.readAsBinaryString(file);
+});
 
 // ── Inline Cell Editor ─────────────────────────────────────────
 function InlineCell({rec,col,onSave}){
@@ -110,10 +167,11 @@ function InlineCell({rec,col,onSave}){
       onBlur={commit}
       onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){setEditing(false);setVal(rec[col.key]||"");}}}/>;
   }
-  const fmtDate=v=>{if(!v)return"—";const d=v.split("T")[0];const p=d.split("-");return p.length===3?`${p[2]}-${p[1]}-${p[0]}`:d;};const disp=col.type==="number"&&rec[col.key]&&!isNaN(parseFloat(rec[col.key]))?`₹${parseFloat(rec[col.key]).toLocaleString()}`:col.type==="date"?fmtDate(rec[col.key]):(rec[col.key]||"—");
-
+  const fmtDate=v=>{if(!v)return"—";const d=v.split("T")[0];const p=d.split("-");return p.length===3?`${p[2]}-${p[1]}-${p[0]}`:d;};
+  const disp=col.type==="number"&&rec[col.key]&&!isNaN(parseFloat(rec[col.key]))?`₹${parseFloat(rec[col.key]).toLocaleString()}`:col.type==="date"?fmtDate(rec[col.key]):(rec[col.key]||"—");
   return <span onClick={()=>{setVal(rec[col.key]||"");setEditing(true);}} title="Click to edit"
-    style={{cursor:"text",display:"block",minWidth:40,paddingBottom:1,borderBottom:"1px dashed transparent",transition:"border-color .15s"}}
+    style={{cursor:"text",display:"block",minWidth:40,paddingBottom:1,borderBottom:"1px dashed transparent",transition:"border-color .15s",
+      color:col.key==="remark"&&rec[col.key]?"#7c3aed":"inherit",fontStyle:col.key==="remark"&&rec[col.key]?"italic":"normal"}}
     onMouseEnter={e=>e.currentTarget.style.borderBottomColor="#a5b4fc"}
     onMouseLeave={e=>e.currentTarget.style.borderBottomColor="transparent"}>{disp}</span>;
 }
@@ -164,7 +222,7 @@ function BunkSummary({records}){
                       <tr style={{background:"#eef2ff"}}>
                         <th style={TH2}>#</th>
                         <th style={TH2}>TRAINEE NAME</th>
-                        {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount","officePaid"].map(k=>(
+                        {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount","officePaid","remark"].map(k=>(
                           <th key={k} style={TH2}>{COLS.find(c=>c.key===k)?.label}</th>
                         ))}
                       </tr>
@@ -174,19 +232,22 @@ function BunkSummary({records}){
                         <tr key={r.id} style={{background:i%2===0?"#fff":"#f8f9ff"}}>
                           <td style={{...TD2,fontWeight:700,color:"#6366f1"}}>{i+1}</td>
                           <td style={{...TD2,color:"#374151",fontWeight:600}}>{r.traineeName||"—"}</td>
-                          {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount","officePaid"].map(k=>(
+                          {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount","officePaid","remark"].map(k=>(
                             <td key={k} style={{...TD2,fontWeight:600,
-                              color:(k==="pendingAmount"&&(parseFloat(r[k])||0)>0)?"#d97706":(k==="officePaid"?"#7c3aed":"#1d4ed8"),
-                              background:(k==="pendingAmount"&&(parseFloat(r[k])||0)>0)?"#fef9c3":(k==="officePaid"?"#f5f3ff":"inherit")}}>
-                              {r[k]&&!isNaN(parseFloat(r[k]))?`₹${parseFloat(r[k]).toLocaleString()}`:(r[k]||"—")}
+                              color:(k==="pendingAmount"&&(parseFloat(r[k])||0)>0)?"#d97706":(k==="officePaid"?"#7c3aed":(k==="remark"?"#7c3aed":"#1d4ed8")),
+                              background:(k==="pendingAmount"&&(parseFloat(r[k])||0)>0)?"#fef9c3":(k==="officePaid"?"#f5f3ff":"inherit"),
+                              fontStyle:k==="remark"?"italic":"normal"}}>
+                              {k==="remark"?(r[k]||"—"):(r[k]&&!isNaN(parseFloat(r[k]))?`₹${parseFloat(r[k]).toLocaleString()}`:(r[k]||"—"))}
                             </td>
                           ))}
                         </tr>
                       ))}
                       <tr style={{background:"#ede9fe",fontWeight:700,borderTop:"1.5px solid #818cf8"}}>
                         <td style={TD2} colSpan={2}>TOTAL</td>
-                        {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount","officePaid"].map(k=>(
-                          <td key={k} style={{...TD2,color:"#5b21b6"}}>₹{(bt[k]||0).toLocaleString()}</td>
+                        {["policyCount","serviceCharge","cms","cash","gPay","pendingAmount","officePaid","remark"].map(k=>(
+                          <td key={k} style={{...TD2,color:"#5b21b6"}}>
+                            {k==="remark"?"":(`₹${(bt[k]||0).toLocaleString()}`)}
+                          </td>
                         ))}
                       </tr>
                     </tbody>
@@ -197,6 +258,153 @@ function BunkSummary({records}){
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── File Upload Modal ─────────────────────────────────────────
+function FileUploadModal({onClose,onImport}){
+  const [dragging,setDragging]=useState(false);
+  const [file,setFile]=useState(null);
+  const [preview,setPreview]=useState(null);
+  const [loading,setLoading]=useState(false);
+  const [error,setError]=useState(null);
+  const [mode,setMode]=useState("replace"); // "replace" | "append"
+  const fileRef=useRef();
+
+  const processFile=async(f)=>{
+    setFile(f);setError(null);setPreview(null);setLoading(true);
+    try{
+      const recs=await parseUploadedFile(f);
+      setPreview(recs);
+    }catch(e){setError(e.message);}
+    setLoading(false);
+  };
+
+  const handleDrop=e=>{
+    e.preventDefault();setDragging(false);
+    const f=e.dataTransfer.files[0];
+    if(f)processFile(f);
+  };
+
+  const handleChange=e=>{
+    const f=e.target.files[0];
+    if(f)processFile(f);
+  };
+
+  const doImport=()=>{
+    if(!preview?.length)return;
+    onImport(preview,mode);
+    onClose();
+  };
+
+  const OV={position:"fixed",inset:0,background:"rgba(30,27,75,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:16};
+  const ext=file?.name?.split(".").pop().toLowerCase();
+  const iconMap={xlsx:"📊",xls:"📊",csv:"📄"};
+  const fileIcon=ext?iconMap[ext]||"📁":"📁";
+
+  return(
+    <div style={OV}>
+      <div style={{background:"#fff",borderRadius:16,border:"2px solid #6366f1",padding:24,width:"95%",maxWidth:560,maxHeight:"90vh",overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,paddingBottom:12,borderBottom:"2px solid #e0e7ff"}}>
+          <div style={{fontSize:16,fontWeight:800,color:"#3730a3"}}>📂 IMPORT FROM FILE</div>
+          <button onClick={onClose} style={{background:"none",border:"2px solid #e2e8f0",borderRadius:6,fontSize:16,cursor:"pointer",color:"#6b7280",width:32,height:32}}>✕</button>
+        </div>
+
+        {/* Supported formats */}
+        <div style={{background:"#eff6ff",border:"1.5px solid #93c5fd",borderRadius:8,padding:"8px 12px",marginBottom:14,fontSize:11,color:"#1e40af",fontWeight:700}}>
+          📌 SUPPORTED: <span style={{color:"#059669"}}>EXCEL (.XLSX, .XLS)</span> &amp; <span style={{color:"#d97706"}}>CSV (.CSV)</span> — FIRST ROW MUST BE HEADERS
+        </div>
+
+        {/* Drop Zone */}
+        <div className={`drop-zone${dragging?" drag-over":""}`}
+          onDragOver={e=>{e.preventDefault();setDragging(true);}}
+          onDragLeave={()=>setDragging(false)}
+          onDrop={handleDrop}
+          onClick={()=>fileRef.current?.click()}>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleChange}/>
+          {file?(
+            <div>
+              <div style={{fontSize:32}}>{fileIcon}</div>
+              <div style={{fontWeight:700,color:"#3730a3",marginTop:6,fontSize:13}}>{file.name}</div>
+              <div style={{fontSize:11,color:"#6b7280",marginTop:2}}>{(file.size/1024).toFixed(1)} KB</div>
+            </div>
+          ):(
+            <div>
+              <div style={{fontSize:36,marginBottom:6}}>⬆️</div>
+              <div style={{fontWeight:700,color:"#4338ca",fontSize:13}}>DRAG & DROP OR CLICK TO BROWSE</div>
+              <div style={{fontSize:11,color:"#9ca3af",marginTop:4}}>EXCEL OR CSV FILES ONLY</div>
+            </div>
+          )}
+        </div>
+
+        {/* Loading */}
+        {loading&&<div style={{textAlign:"center",padding:"14px 0",color:"#6366f1",fontWeight:700,fontSize:13}}>
+          <span className="spin" style={{display:"inline-block",marginRight:6}}>⟳</span> PARSING FILE...
+        </div>}
+
+        {/* Error */}
+        {error&&<div style={{background:"#fee2e2",border:"1.5px solid #ef4444",borderRadius:8,padding:"10px 14px",marginTop:12,fontSize:12,color:"#dc2626",fontWeight:700}}>
+          ❌ {error}
+        </div>}
+
+        {/* Preview */}
+        {preview&&!loading&&(
+          <div style={{marginTop:14}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+              <div style={{fontWeight:800,color:"#3730a3",fontSize:13}}>
+                ✅ {preview.length} RECORD{preview.length!==1?"S":""} FOUND
+              </div>
+              {/* Import mode */}
+              <div style={{display:"flex",gap:4}}>
+                {[["replace","🔄 REPLACE ALL"],["append","➕ APPEND"]].map(([v,l])=>(
+                  <button key={v} onClick={()=>setMode(v)} style={{padding:"4px 10px",borderRadius:6,border:`2px solid ${mode===v?"#6366f1":"#c7d2fe"}`,background:mode===v?"#6366f1":"#fff",color:mode===v?"#fff":"#6366f1",fontSize:10,cursor:"pointer",fontWeight:700}}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* Preview table */}
+            <div style={{overflowX:"auto",border:"1.5px solid #c7d2fe",borderRadius:8,maxHeight:180}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:10,minWidth:400}}>
+                <thead>
+                  <tr style={{background:"#eef2ff",position:"sticky",top:0}}>
+                    {["#","BUNK NAME","TRAINEE NAME","POLICY","SERVICE CHARGE","REMARK"].map(h=>(
+                      <th key={h} style={{padding:"5px 8px",textAlign:"left",color:"#4338ca",fontWeight:700,borderBottom:"1.5px solid #c7d2fe",whiteSpace:"nowrap"}}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {preview.slice(0,8).map((r,i)=>(
+                    <tr key={r.id} style={{background:i%2===0?"#fff":"#f8f9ff"}}>
+                      <td style={{padding:"4px 8px",color:"#6366f1",fontWeight:700}}>{i+1}</td>
+                      <td style={{padding:"4px 8px"}}>{r.bunkName||"—"}</td>
+                      <td style={{padding:"4px 8px"}}>{r.traineeName||"—"}</td>
+                      <td style={{padding:"4px 8px"}}>{r.policyCount||"—"}</td>
+                      <td style={{padding:"4px 8px"}}>{r.serviceCharge||"—"}</td>
+                      <td style={{padding:"4px 8px",color:"#7c3aed",fontStyle:"italic"}}>{r.remark||"—"}</td>
+                    </tr>
+                  ))}
+                  {preview.length>8&&<tr><td colSpan={6} style={{padding:"4px 8px",color:"#9ca3af",fontStyle:"italic",textAlign:"center"}}>... AND {preview.length-8} MORE RECORDS</td></tr>}
+                </tbody>
+              </table>
+            </div>
+            {mode==="replace"&&<div style={{background:"#fef3c7",border:"1.5px solid #f59e0b",borderRadius:6,padding:"6px 10px",marginTop:8,fontSize:11,color:"#92400e",fontWeight:700}}>
+              ⚠ REPLACE MODE: EXISTING RECORDS WILL BE OVERWRITTEN
+            </div>}
+            {mode==="append"&&<div style={{background:"#f0fdf4",border:"1.5px solid #86efac",borderRadius:6,padding:"6px 10px",marginTop:8,fontSize:11,color:"#15803d",fontWeight:700}}>
+              ➕ APPEND MODE: RECORDS WILL BE ADDED TO EXISTING DATA
+            </div>}
+          </div>
+        )}
+
+        <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:16,paddingTop:12,borderTop:"2px solid #e0e7ff"}}>
+          <button onClick={onClose} style={{padding:"8px 14px",borderRadius:8,border:"2px solid #6b7280",background:"transparent",color:"#6b7280",fontWeight:700,fontSize:12,cursor:"pointer"}}>CANCEL</button>
+          <button onClick={doImport} disabled={!preview||loading} style={{padding:"8px 16px",borderRadius:8,border:"none",background:preview&&!loading?"#6366f1":"#c7d2fe",color:"#fff",fontWeight:700,fontSize:12,cursor:preview&&!loading?"pointer":"not-allowed"}}>
+            📂 IMPORT {preview?`${preview.length} RECORDS`:""}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -228,9 +436,9 @@ function App(){
   const [undoStack,setUndoStack]=useState(null);
   const [renameId,setRenameId]=useState(null);
   const [renameName,setRenameName]=useState("");
-  // NEW: date range filter
   const [dateFrom,setDateFrom]=useState("");
   const [dateTo,setDateTo]=useState("");
+  const [showUpload,setShowUpload]=useState(false); // ← NEW
 
   const tRef=useRef();const undoRef=useRef();
   useEffect(()=>{saveState(invs,activeId);},[invs,activeId]);
@@ -253,9 +461,7 @@ function App(){
     return baseDisplay.filter(r=>COLS.some(c=>String(r[c.key]||"").toLowerCase().includes(q)));
   },[baseDisplay,currentSearch]);
 
-  // Parse date string as local date (avoids UTC timezone shift)
   const parseLocalDate=s=>{if(!s)return null;const p=s.split("T")[0].split("-");return p.length===3?new Date(+p[0],+p[1]-1,+p[2]):null;};
-  // NEW: date range filter applied after search
   const dateFiltered=useMemo(()=>{
     if(!dateFrom&&!dateTo)return searched;
     const dFrom=parseLocalDate(dateFrom),dTo=parseLocalDate(dateTo);
@@ -288,10 +494,8 @@ function App(){
   const upd=(fn)=>setInvs(p=>p.map(i=>i.id===activeId?{...i,records:fn(i.records)}:i));
   const toggleSort=(key)=>{if(sortKey===key){setSortDir(d=>d==="asc"?"desc":"asc");}else{setSortKey(key);setSortDir("asc");}};
 
-  // NEW: check duplicate trainee name in this CMS
   const checkDup=(name,excludeId=null)=>!!name&&records.some(r=>r.id!==excludeId&&r.traineeName.toUpperCase()===name.trim().toUpperCase());
 
-  // NEW: form field change with auto-service-charge + duplicate check
   const handleFormChange=(key,value)=>{
     setForm(f=>{
       const next={...f,[key]:value};
@@ -306,7 +510,6 @@ function App(){
     }
   };
 
-  // NEW: inline cell save with auto service charge
   const inlineSave=(recId,key,value)=>{
     setInvs(p=>p.map(i=>{
       if(i.id!==activeId)return i;
@@ -334,7 +537,6 @@ function App(){
     if(!form.bunkName||!form.traineeName){showToast("Bunk Name & Trainee Name required","error");return;}
     if(editId===null&&checkDup(form.traineeName)){showToast(`⚠ DUPLICATE: ${form.traineeName} already exists!`,"error");return;}
     const rec={...form,id:editId!==null?editId:uid()};
-    // Build the committed records list synchronously before async sheet push
     const committedRecords=editId!==null
       ?(active?.records||[]).map(x=>x.id===editId?rec:x)
       :[...(active?.records||[]),rec];
@@ -426,6 +628,17 @@ function App(){
     setSyncing(false);
   };
 
+  // ── File Import Handler ──────────────────────────────────────
+  const handleFileImport=(importedRecs,mode)=>{
+    if(mode==="replace"){
+      upd(()=>importedRecs);
+      showToast(`📂 Imported ${importedRecs.length} records (replaced)`);
+    } else {
+      upd(existing=>[...existing,...importedRecs]);
+      showToast(`📂 Appended ${importedRecs.length} records`);
+    }
+  };
+
   const closeInv=()=>{
     const closedAt=new Date().toLocaleString();
     const remaining=invs.filter(i=>i.id!==activeId&&!i.closedAt);
@@ -475,7 +688,6 @@ function App(){
     if(!undoStack)return;
     setInvs(p=>p.map(i=>{
       if(i.id!==undoStack.invId)return i;
-      // Merge restored records back, avoiding duplicates, preserving order
       const existingIds=new Set(i.records.map(r=>r.id));
       const toRestore=undoStack.records.filter(r=>!existingIds.has(r.id));
       return{...i,records:[...i.records,...toRestore]};
@@ -511,7 +723,8 @@ function App(){
     const avgPolicy=(display.reduce((s,x)=>s+(parseFloat(x.policyCount)||0),0)/n).toFixed(1);
     const topBunk=[...display.reduce((m,x)=>{m.set(x.bunkName||"?",(m.get(x.bunkName||"?")||0)+1);return m;},new Map())].sort((a,b)=>b[1]-a[1])[0];
     const pending=display.filter(x=>(parseFloat(x.pendingAmount)||0)>0).length;
-    return{avgPolicy,topBunk:topBunk?topBunk[0]:"—",pending};
+    const withRemark=display.filter(x=>x.remark&&x.remark.trim()).length;
+    return{avgPolicy,topBunk:topBunk?topBunk[0]:"—",pending,withRemark};
   },[display]);
 
   const isDateFiltered=!!(dateFrom||dateTo);
@@ -545,6 +758,7 @@ function App(){
           </div>
           <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
             {!isHist&&<button onClick={()=>{setForm(EMPTY());setEditId(null);setDupWarn(null);setShowForm(true);}} style={btn("#3b82f6","#fff")}>+ ADD</button>}
+            {!isHist&&<button onClick={()=>setShowUpload(true)} style={btn("#0ea5e9","#fff")}>📂 IMPORT</button>}
             {selected.size>0&&!isHist&&<button onClick={()=>setShowBulkDel(true)} style={btn("#ef4444","#fff")}>🗑 DEL ({selected.size})</button>}
             <div style={{display:"inline-flex"}}>
               <button onClick={()=>download(display,currentInv?.name,"xls")} style={{...btn("#10b981","#fff"),borderTopRightRadius:0,borderBottomRightRadius:0,borderRight:"1px solid rgba(255,255,255,0.3)"}}>⬇ XLS</button>
@@ -580,7 +794,6 @@ function App(){
 
       {/* SEARCH + DATE FILTER */}
       <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"stretch"}}>
-        {/* Search */}
         <div style={{flex:"2 1 200px",border:"2px solid #a5b4fc",borderRadius:10,background:"#fff",display:"flex",alignItems:"center",overflow:"hidden"}}>
           <input placeholder="🔍 SEARCH..." value={isHist?histSearch:search}
             onChange={e=>isHist?setHistSearch(e.target.value.toUpperCase()):setSearch(e.target.value.toUpperCase())}
@@ -588,7 +801,6 @@ function App(){
           {(isHist?histSearch:search)&&<button onClick={()=>isHist?setHistSearch(""):setSearch("")} style={{background:"none",border:"none",color:"#6b7280",cursor:"pointer",padding:"0 12px",fontSize:16}}>✕</button>}
           {!isHist&&<div style={{padding:"0 12px",fontSize:11,color:"#6366f1",fontWeight:700,whiteSpace:"nowrap"}}>{display.length}/{records.length}</div>}
         </div>
-        {/* Date Range Filter */}
         <div style={{flex:"3 1 280px",border:`2px solid ${isDateFiltered?"#3b82f6":"#a5b4fc"}`,borderRadius:10,background:"#fff",display:"flex",alignItems:"center",gap:6,padding:"0 10px"}}>
           <span style={{fontSize:11,fontWeight:700,color:"#4338ca",whiteSpace:"nowrap"}}>📅 FROM</span>
           <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}
@@ -600,7 +812,6 @@ function App(){
         </div>
       </div>
 
-      {/* DATE FILTER BADGE */}
       {isDateFiltered&&<div style={{background:"#dbeafe",border:"2px solid #3b82f6",borderRadius:8,padding:"5px 12px",marginBottom:10,fontSize:11,fontWeight:700,color:"#1d4ed8",display:"inline-block"}}>
         📅 FILTERED: {dateFrom||"..."} → {dateTo||"..."} | {display.length} RECORD{display.length!==1?"S":""}
       </div>}
@@ -638,6 +849,7 @@ function App(){
       {stats&&display.length>0&&<div style={{background:"#fff",border:"2px solid #c7d2fe",borderRadius:10,padding:"8px 14px",marginBottom:12,display:"flex",gap:12,flexWrap:"wrap",fontSize:11,color:"#4338ca",fontWeight:700}}>
         <span>📊 {display.length} RECORDS</span><span>|</span>
         <span style={{color:stats.pending>0?"#f59e0b":"#10b981"}}>⚠ {stats.pending} WITH PENDING</span>
+        {stats.withRemark>0&&<><span>|</span><span style={{color:"#7c3aed"}}>💬 {stats.withRemark} WITH REMARK</span></>}
         {selected.size>0&&<><span>|</span><span style={{color:"#ef4444"}}>☑ {selected.size} SELECTED</span></>}
       </div>}
 
@@ -648,11 +860,11 @@ function App(){
 
       {/* TABLE */}
       <div style={{background:"#fff",borderRadius:12,border:"2px solid #a5b4fc",overflowX:"auto"}}>
-        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:1300}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:1400}}>
           <thead><tr>
             {!isHist&&<th style={{...TH,cursor:"default"}}><input type="checkbox" checked={allDisplaySelected} onChange={selectAll} style={{cursor:"pointer"}}/></th>}
             <th style={{...TH,cursor:"default"}}>S NO</th>
-            {COLS.map(c=><th key={c.key} style={TH} onClick={()=>toggleSort(c.key)}>{c.label}{sortArrow(c.key)}</th>)}
+            {COLS.map(c=><th key={c.key} style={{...TH,background:c.key==="remark"?"#f5f3ff":TH.background}} onClick={()=>toggleSort(c.key)}>{c.label}{sortArrow(c.key)}</th>)}
             {!isHist&&<th style={{...TH,cursor:"default"}}>ACTIONS</th>}
           </tr></thead>
           <tbody>
@@ -665,8 +877,10 @@ function App(){
                 {!isHist&&<td style={{...TD,textAlign:"center"}}><input type="checkbox" checked={selected.has(r.id)} onChange={()=>toggleSelect(r.id)} style={{cursor:"pointer"}}/></td>}
                 <td style={{...TD,fontWeight:700,color:"#6366f1"}}>{i+1}</td>
                 {COLS.map(c=>(
-                  <td key={c.key} style={{...TD,fontWeight:c.type==="number"?600:400,color:c.type==="number"?"#1d4ed8":"#374151",
-                    background:c.key==="pendingAmount"&&(parseFloat(r[c.key])||0)>0?"#fef9c3":"inherit",
+                  <td key={c.key} style={{...TD,fontWeight:c.type==="number"?600:400,
+                    color:c.key==="remark"?"#7c3aed":(c.type==="number"?"#1d4ed8":"#374151"),
+                    background:c.key==="pendingAmount"&&(parseFloat(r[c.key])||0)>0?"#fef9c3":(c.key==="remark"&&r[c.key]?"#faf5ff":"inherit"),
+                    fontStyle:c.key==="remark"?"italic":"normal",
                     padding:!isHist?"4px 8px":TD.padding}}>
                     {!isHist
                       ?<InlineCell rec={r} col={c} onSave={(key,val)=>inlineSave(r.id,key,val)}/>
@@ -699,32 +913,39 @@ function App(){
             <button onClick={()=>{setShowForm(false);setEditId(null);setForm(EMPTY());setDupWarn(null);}} style={{background:"none",border:"2px solid #e2e8f0",borderRadius:6,fontSize:16,cursor:"pointer",color:"#6b7280",width:32,height:32}}>✕</button>
           </div>
 
-          {/* DUPLICATE WARNING */}
-          {dupWarn&&<div style={{background:"#fef3c7",border:"2px solid #f59e0b",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:12,fontWeight:700,color:"#92400e"}}>
-            {dupWarn}
-          </div>}
+          {dupWarn&&<div style={{background:"#fef3c7",border:"2px solid #f59e0b",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:12,fontWeight:700,color:"#92400e"}}>{dupWarn}</div>}
 
-          {/* AUTO SERVICE CHARGE HINT */}
           <div style={{background:"#f0fdf4",border:"1.5px solid #86efac",borderRadius:8,padding:"7px 12px",marginBottom:12,fontSize:11,color:"#15803d",fontWeight:700}}>
             💡 SERVICE CHARGE = POLICY COUNT × ₹{SERVICE_CHARGE_RATE} (AUTO-FILLED)
           </div>
 
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
             {COLS.map(c=>(
-              <div key={c.key} style={{display:"flex",flexDirection:"column",gap:3,border:`1.5px solid ${c.key==="serviceCharge"?"#86efac":"#e0e7ff"}`,borderRadius:8,padding:"8px 10px",background:c.key==="serviceCharge"?"#f0fdf4":"#f8faff"}}>
-                <label style={{fontSize:10,fontWeight:700,color:c.key==="serviceCharge"?"#15803d":"#6366f1"}}>
+              <div key={c.key} style={{display:"flex",flexDirection:"column",gap:3,
+                border:`1.5px solid ${c.key==="serviceCharge"?"#86efac":c.key==="remark"?"#c4b5fd":"#e0e7ff"}`,
+                borderRadius:8,padding:"8px 10px",
+                background:c.key==="serviceCharge"?"#f0fdf4":c.key==="remark"?"#faf5ff":"#f8faff",
+                gridColumn:c.key==="remark"?"1 / -1":"auto"}}>
+                <label style={{fontSize:10,fontWeight:700,color:c.key==="serviceCharge"?"#15803d":c.key==="remark"?"#7c3aed":"#6366f1"}}>
                   {c.label}
                   {["bunkName","traineeName"].includes(c.key)&&<span style={{color:"#ef4444"}}> *</span>}
                   {c.key==="serviceCharge"&&<span style={{color:"#15803d"}}> ✦ AUTO</span>}
+                  {c.key==="remark"&&<span style={{color:"#7c3aed"}}> 💬</span>}
                 </label>
-                <input
-                  type={c.type==="number"?"number":c.type==="date"?"date":"text"}
-                  value={form[c.key]}
-                  readOnly={c.key==="serviceCharge"}
-                  onChange={e=>handleFormChange(c.key,c.type==="number"||c.type==="date"?e.target.value:e.target.value.toUpperCase())}
-                  style={{padding:"6px 8px",borderRadius:6,border:"1.5px solid #c7d2fe",fontSize:12,outline:"none",background:c.key==="serviceCharge"?"#dcfce7":"#fff",cursor:c.key==="serviceCharge"?"not-allowed":"text"}}
-                  placeholder={c.key==="serviceCharge"?"AUTO FROM POLICY COUNT":c.label}
-                />
+                {c.key==="remark"?(
+                  <textarea value={form[c.key]} onChange={e=>handleFormChange(c.key,e.target.value.toUpperCase())}
+                    placeholder="ENTER ANY REMARKS OR NOTES..."
+                    style={{padding:"6px 8px",borderRadius:6,border:"1.5px solid #c4b5fd",fontSize:12,outline:"none",background:"#fff",resize:"vertical",minHeight:60,fontFamily:"Inter,sans-serif",textTransform:"uppercase"}}/>
+                ):(
+                  <input
+                    type={c.type==="number"?"number":c.type==="date"?"date":"text"}
+                    value={form[c.key]}
+                    readOnly={c.key==="serviceCharge"}
+                    onChange={e=>handleFormChange(c.key,c.type==="number"||c.type==="date"?e.target.value:e.target.value.toUpperCase())}
+                    style={{padding:"6px 8px",borderRadius:6,border:"1.5px solid #c7d2fe",fontSize:12,outline:"none",background:c.key==="serviceCharge"?"#dcfce7":"#fff",cursor:c.key==="serviceCharge"?"not-allowed":"text"}}
+                    placeholder={c.key==="serviceCharge"?"AUTO FROM POLICY COUNT":c.label}
+                  />
+                )}
               </div>
             ))}
           </div>
@@ -735,6 +956,9 @@ function App(){
           </div>
         </div>
       </div>}
+
+      {/* FILE UPLOAD MODAL */}
+      {showUpload&&<FileUploadModal onClose={()=>setShowUpload(false)} onImport={handleFileImport}/>}
 
       {/* CLOSE CONFIRM */}
       {showClose&&<div style={OV}><div style={{background:"#fff",borderRadius:14,border:"2px solid #f59e0b",padding:24,maxWidth:340,width:"90%",textAlign:"center"}}>
