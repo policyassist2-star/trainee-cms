@@ -39,8 +39,8 @@ const {useState,useRef,useEffect,useMemo,useCallback}=React;
 const SCRIPT_URL="https://script.google.com/macros/s/AKfycbyLkU-oaFpujlL9WyMosChY8AWfv58yrkjo2FYo9VSLUbXvwiNTRFxr3eFe0cB1dnfEPw/exec";
 const SERVICE_CHARGE_RATE=165;
 
-// ── 50 Bunk Names ─────────────────────────────────────────────
-const BUNK_NAMES=[
+// ── 50 Default Bunk Names ─────────────────────────────────────
+const DEFAULT_BUNK_NAMES=[
   "BUNK 01","BUNK 02","BUNK 03","BUNK 04","BUNK 05",
   "BUNK 06","BUNK 07","BUNK 08","BUNK 09","BUNK 10",
   "BUNK 11","BUNK 12","BUNK 13","BUNK 14","BUNK 15",
@@ -52,6 +52,7 @@ const BUNK_NAMES=[
   "BUNK 41","BUNK 42","BUNK 43","BUNK 44","BUNK 45",
   "BUNK 46","BUNK 47","BUNK 48","BUNK 49","BUNK 50",
 ];
+let BUNK_NAMES=[...DEFAULT_BUNK_NAMES];
 
 const COLS=[
   {key:"bunkName",label:"Bunk Name"},
@@ -104,6 +105,20 @@ const scriptCall=async(payload)=>{
   if(!res.ok)throw new Error("HTTP "+res.status);
   const text=await res.text();
   try{return JSON.parse(text);}catch(e){throw new Error("Bad response: "+text.slice(0,120));}
+};
+
+const saveBunkNamesToSheet=async(names)=>{
+  try{await scriptCall({action:"saveBunkNames",names});return true;}catch(e){return false;}
+};
+const loadBunkNamesFromSheet=async()=>{
+  try{
+    const json=await scriptCall({action:"getBunkNames"});
+    if(json.ok&&json.names&&json.names.length>0){
+      BUNK_NAMES.splice(0,BUNK_NAMES.length,...json.names);
+      return json.names;
+    }
+  }catch(e){}
+  return null;
 };
 
 const toCSV=(recs)=>{
@@ -478,6 +493,79 @@ function FileUploadModal({onClose,onImport}){
   );
 }
 
+// ── Save Bunk Names Button (handles async) ────────────────────
+function SaveBunkBtn({names,onSave,onClose}){
+  const [saving,setSaving]=useState(false);
+  const [err,setErr]=useState(null);
+  const doSave=async()=>{
+    setSaving(true);setErr(null);
+    const cleaned=names.map((n,i)=>n.trim()||DEFAULT_BUNK_NAMES[i]);
+    const ok=await saveBunkNamesToSheet(cleaned);
+    if(ok){
+      BUNK_NAMES.splice(0,BUNK_NAMES.length,...cleaned);
+      onSave(cleaned);
+      onClose();
+    }else{
+      setErr("SAVE FAILED - CHECK NETWORK");
+      setSaving(false);
+    }
+  };
+  return(
+    <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
+      {err&&<div style={{fontSize:11,color:"#dc2626",fontWeight:700}}>{err}</div>}
+      <button onClick={doSave} disabled={saving} style={{padding:"8px 18px",borderRadius:8,border:"none",background:saving?"#a5b4fc":"#6366f1",color:"#fff",fontWeight:700,fontSize:12,cursor:saving?"not-allowed":"pointer"}}>
+        {saving?<><span className="spin" style={{display:"inline-block",marginRight:4}}>⟳</span>SAVING...</>:"SAVE ALL NAMES"}
+      </button>
+    </div>
+  );
+}
+
+// ── Bunk Name Settings Modal ──────────────────────────────────
+function BunkSettingsModal({onClose,onSave}){
+  const [names,setNames]=useState([...BUNK_NAMES]);
+  const [search,setSearch]=useState("");
+  const filtered=search?names.map((n,i)=>({n,i})).filter(({n,i})=>n.toLowerCase().includes(search.toLowerCase())||DEFAULT_BUNK_NAMES[i].toLowerCase().includes(search.toLowerCase())):names.map((n,i)=>({n,i}));
+  const reset=()=>{if(window.confirm("RESET ALL TO DEFAULT? (BUNK 01, BUNK 02...)")){setNames([...DEFAULT_BUNK_NAMES]);}}
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(30,27,75,0.65)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:2000,padding:16}}>
+      <div style={{background:"#fff",borderRadius:16,border:"2px solid #6366f1",padding:24,width:"95%",maxWidth:600,maxHeight:"92vh",display:"flex",flexDirection:"column",gap:0}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,paddingBottom:12,borderBottom:"2px solid #e0e7ff"}}>
+          <div style={{fontSize:16,fontWeight:800,color:"#3730a3"}}>⚙ CUSTOMIZE BUNK NAMES</div>
+          <button onClick={onClose} style={{background:"none",border:"2px solid #e2e8f0",borderRadius:6,fontSize:16,cursor:"pointer",color:"#6b7280",width:32,height:32}}>✕</button>
+        </div>
+        <div style={{background:"#eff6ff",border:"1.5px solid #93c5fd",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:11,color:"#1e40af",fontWeight:700}}>
+          💡 TYPE CUSTOM NAME FOR EACH BUNK — CHANGES APPLY TO ALL CMS. LEFT = DEFAULT SLOT, RIGHT = YOUR CUSTOM NAME.
+        </div>
+        <input placeholder="🔍 SEARCH BUNK..." value={search} onChange={e=>setSearch(e.target.value.toUpperCase())}
+          style={{padding:"8px 12px",border:"2px solid #c7d2fe",borderRadius:8,fontSize:12,outline:"none",marginBottom:10,fontFamily:"Inter,sans-serif",textTransform:"uppercase"}}/>
+        <div style={{overflowY:"auto",flex:1,maxHeight:"52vh",paddingRight:4}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+            {filtered.map(({n,i})=>(
+              <div key={i} style={{display:"flex",alignItems:"center",gap:6,background:"#f8f9ff",borderRadius:8,border:"1.5px solid #e0e7ff",padding:"6px 10px"}}>
+                <span style={{fontSize:10,color:"#9ca3af",fontWeight:700,minWidth:52,flexShrink:0}}>{DEFAULT_BUNK_NAMES[i]}</span>
+                <span style={{color:"#c7d2fe",fontSize:12,flexShrink:0}}>→</span>
+                <input
+                  value={n}
+                  onChange={e=>{const upd=[...names];upd[i]=e.target.value.toUpperCase();setNames(upd);}}
+                  placeholder={DEFAULT_BUNK_NAMES[i]}
+                  style={{flex:1,padding:"4px 7px",border:"1.5px solid #c7d2fe",borderRadius:6,fontSize:12,outline:"none",background:"#fff",fontFamily:"Inter,sans-serif",textTransform:"uppercase",fontWeight:700,color:"#3730a3",minWidth:0}}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:16,paddingTop:12,borderTop:"2px solid #e0e7ff",gap:8,flexWrap:"wrap"}}>
+          <button onClick={reset} style={{padding:"8px 14px",borderRadius:8,border:"2px solid #f59e0b",background:"#fffbeb",color:"#92400e",fontWeight:700,fontSize:12,cursor:"pointer"}}>🔄 RESET TO DEFAULT</button>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={onClose} style={{padding:"8px 14px",borderRadius:8,border:"2px solid #6b7280",background:"transparent",color:"#6b7280",fontWeight:700,fontSize:12,cursor:"pointer"}}>CANCEL</button>
+            <SaveBunkBtn names={names} onSave={onSave} onClose={onClose}/>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────
 function App(){
   const stored=loadState();
@@ -508,10 +596,22 @@ function App(){
   const [dateTo,setDateTo]=useState("");
   const [showUpload,setShowUpload]=useState(false);
   const [showPendingBunks,setShowPendingBunks]=useState(false);
+  const [showBunkSettings,setShowBunkSettings]=useState(false);
+  const [bunkNamesVer,setBunkNamesVer]=useState(0);
+  const [bunkLoading,setBunkLoading]=useState(false);
 
   const tRef=useRef();const undoRef=useRef();
   useEffect(()=>{saveState(invs,activeId);},[invs,activeId]);
   useEffect(()=>()=>{clearTimeout(tRef.current);clearTimeout(undoRef.current);},[]);
+
+  // Load bunk names from Google Sheet on startup
+  useEffect(()=>{
+    setBunkLoading(true);
+    loadBunkNamesFromSheet().then(names=>{
+      if(names)setBunkNamesVer(v=>v+1);
+      setBunkLoading(false);
+    });
+  },[]);
 
   const showToast=(msg,type="success")=>{setToast({msg,type});clearTimeout(tRef.current);tRef.current=setTimeout(()=>setToast(null),2800);};
 
@@ -822,6 +922,7 @@ function App(){
             </div>
             {!isHist&&<button onClick={()=>setShowClose(true)} style={btn("#f59e0b","#fff")}>🔒 CLOSE</button>}
             <button onClick={()=>setShowNew(true)} style={btn("#8b5cf6","#fff")}>✨ NEW CMS</button>
+            <button onClick={()=>setShowBunkSettings(true)} style={btn("#0f172a","#fff")} title="Customize Bunk Names">{bunkLoading?<span className="spin">⟳</span>:"⚙"} BUNKS</button>
           </div>
         </div>
         <div style={{display:"flex",gap:6,marginTop:10,flexWrap:"wrap",alignItems:"center"}}>
@@ -1015,6 +1116,8 @@ function App(){
       </div>}
 
       {showUpload&&<FileUploadModal onClose={()=>setShowUpload(false)} onImport={handleFileImport}/>}
+
+      {showBunkSettings&&<BunkSettingsModal onClose={()=>setShowBunkSettings(false)} onSave={(names)=>{setBunkNamesVer(v=>v+1);showToast("Bunk names saved!");}}/>}
 
       {/* PENDING BUNKS MODAL */}
       {showPendingBunks&&<div style={{position:"fixed",inset:0,background:"rgba(30,27,75,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:16}}>
