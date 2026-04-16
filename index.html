@@ -39,18 +39,18 @@ const {useState,useRef,useEffect,useMemo,useCallback}=React;
 const SCRIPT_URL="https://script.google.com/macros/s/AKfycbyLkU-oaFpujlL9WyMosChY8AWfv58yrkjo2FYo9VSLUbXvwiNTRFxr3eFe0cB1dnfEPw/exec";
 const SERVICE_CHARGE_RATE=165;
 
-// ── 50 Default Bunk Names ─────────────────────────────────────
+// ── 50 Default Bunk Names (from master list) ─────────────────
 const DEFAULT_BUNK_NAMES=[
-  "BUNK 01","BUNK 02","BUNK 03","BUNK 04","BUNK 05",
-  "BUNK 06","BUNK 07","BUNK 08","BUNK 09","BUNK 10",
-  "BUNK 11","BUNK 12","BUNK 13","BUNK 14","BUNK 15",
-  "BUNK 16","BUNK 17","BUNK 18","BUNK 19","BUNK 20",
-  "BUNK 21","BUNK 22","BUNK 23","BUNK 24","BUNK 25",
-  "BUNK 26","BUNK 27","BUNK 28","BUNK 29","BUNK 30",
-  "BUNK 31","BUNK 32","BUNK 33","BUNK 34","BUNK 35",
-  "BUNK 36","BUNK 37","BUNK 38","BUNK 39","BUNK 40",
-  "BUNK 41","BUNK 42","BUNK 43","BUNK 44","BUNK 45",
-  "BUNK 46","BUNK 47","BUNK 48","BUNK 49","BUNK 50",
+  "COCO MM NAGAR","ANNAI ARUL","JALPHIROJ","RADHA","SRI SAKTHI",
+  "SRI GANESH","KPN","CENTRAL","VETRIVEL","VENKATACHALAM",
+  "PALANIAPPA","AATHITHYA","SRI SAI BALAJI","ANNAI","AVM",
+  "BSN","G V FUELS","VIJAYA AUTO","MKR","RUDHRAM",
+  "COCO MADURAVOYAL","COCO SANTHI COLONY","COCO VELACHERY","KAVITHAA","AMMAN AUTO",
+  "SARAVANA FUELS","COCO MOGAPAIR","SLN","EKAYERS","SRI KRISHNA",
+  "SRI MEENAKSHI","SRIDEVI","THIRU ARUL","ASM","MR SHANMUGHAM",
+  "SUKKARA","TUCS","MYTHILI","OM SAKTHI","SARATH",
+  "KCD","KALAISELVI","DURAISWAMY","COCO ANNASALAI","SHANMUGA SUNDARAM",
+  "SEA SHALL","ARAVIBDHAR","VIGNESH","BUNK 49","BUNK 50",
 ];
 let BUNK_NAMES=[...DEFAULT_BUNK_NAMES];
 
@@ -75,7 +75,7 @@ const COLS=[
 ];
 const NUM_COLS=COLS.filter(c=>c.type==="number").map(c=>c.key);
 const STORAGE_KEY="trainee_cms_v4";
-const BUNK_NAMES_KEY="trainee_cms_bunk_names_v4";
+const BUNK_NAMES_KEY="trainee_cms_bunk_names_v5";
 const EMPTY=()=>Object.fromEntries(COLS.map(c=>[c.key,""]));
 const mkInv=(name,id)=>({id,name,records:[],closedAt:null,createdAt:new Date().toLocaleString()});
 const loadState=()=>{try{const r=localStorage.getItem(STORAGE_KEY);return r?JSON.parse(r):null;}catch{return null;}};
@@ -89,18 +89,30 @@ const uid=()=>String(++_uid);
 const normalizeDate=v=>{
   if(!v)return"";
   const s=String(v).trim();
+  // Already in YYYY-MM-DD (from HTML date input) — use as-is
   if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s;
   if(/^\d{4}-\d{2}-\d{2}T/.test(s))return s.slice(0,10);
+  // DD-MM-YYYY or DD/MM/YYYY (Indian format) → YYYY-MM-DD
   const dmy=/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/.exec(s);
   if(dmy)return`${dmy[3]}-${dmy[2].padStart(2,"0")}-${dmy[1].padStart(2,"0")}`;
+  // DD-MM-YY short year
+  const dmyShort=/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{2})$/.exec(s);
+  if(dmyShort){const yr=parseInt(dmyShort[3]);const fullYr=yr<50?2000+yr:1900+yr;return`${fullYr}-${dmyShort[2].padStart(2,"0")}-${dmyShort[1].padStart(2,"0")}`;}
+  // Excel serial number
   if(/^\d+(\.\d+)?$/.test(s)){
     const serial=Math.floor(parseFloat(s));
     const d=new Date(Date.UTC(1899,11,30)+serial*86400000);
     return`${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
   }
-  const dt=new Date(s);
-  if(!isNaN(dt))return`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
-  return s;
+  // YYYY/MM/DD
+  const ymd=/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/.exec(s);
+  if(ymd)return`${ymd[1]}-${ymd[2].padStart(2,"0")}-${ymd[3].padStart(2,"0")}`;
+  // MM/DD/YYYY (US format from some Excel exports) — only use if day>12 is impossible in MM slot
+  // AVOID new Date(s) — JS parses ambiguous strings as MM-DD (US), wrong for Indian DD-MM
+  // Safe fallback: try YYYY-MM-DD strict ISO only
+  const iso=/^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+  if(iso)return`${iso[1]}-${iso[2].padStart(2,"0")}-${iso[3].padStart(2,"0")}`;
+  return s; // return as-is if unrecognized
 };
 
 const scriptCall=async(payload)=>{
@@ -565,30 +577,31 @@ function BunkSettingsModal({onClose,onSave,currentBunkNames}){
   };
 
   return(
-    <div style={{position:"fixed",inset:0,background:"rgba(30,27,75,0.65)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:2000,padding:16}}>
-      <div style={{background:"#fff",borderRadius:16,border:"2px solid #6366f1",padding:24,width:"95%",maxWidth:640,maxHeight:"92vh",display:"flex",flexDirection:"column",gap:0}}>
+    <div style={{position:"fixed",inset:0,background:"rgba(30,27,75,0.65)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:2000,padding:12}}>
+      <div style={{background:"#fff",borderRadius:16,border:"2px solid #6366f1",padding:20,width:"100%",maxWidth:720,maxHeight:"94vh",display:"flex",flexDirection:"column",gap:0,boxSizing:"border-box"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,paddingBottom:12,borderBottom:"2px solid #e0e7ff"}}>
-          <div style={{fontSize:16,fontWeight:800,color:"#3730a3"}}>⚙ CUSTOMIZE BUNK NAMES ({names.length} BUNKS)</div>
-          <button onClick={onClose} style={{background:"none",border:"2px solid #e2e8f0",borderRadius:6,fontSize:16,cursor:"pointer",color:"#6b7280",width:32,height:32}}>✕</button>
+          <div style={{fontSize:15,fontWeight:800,color:"#3730a3"}}>⚙ CUSTOMIZE BUNK NAMES ({names.length} BUNKS)</div>
+          <button onClick={onClose} style={{background:"none",border:"2px solid #e2e8f0",borderRadius:6,fontSize:16,cursor:"pointer",color:"#6b7280",width:32,height:32,flexShrink:0}}>✕</button>
         </div>
         <div style={{background:"#eff6ff",border:"1.5px solid #93c5fd",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:11,color:"#1e40af",fontWeight:700}}>
           💡 TYPE CUSTOM NAME FOR EACH BUNK — CHANGES APPLY TO ALL CMS. LEFT = DEFAULT SLOT, RIGHT = YOUR CUSTOM NAME.
         </div>
-        <div style={{display:"flex",gap:6,marginBottom:10,alignItems:"center",background:"#f0fdf4",border:"1.5px solid #86efac",borderRadius:8,padding:"8px 10px"}}>
+        <div style={{display:"flex",gap:6,marginBottom:10,alignItems:"center",background:"#f0fdf4",border:"1.5px solid #86efac",borderRadius:8,padding:"8px 10px",boxSizing:"border-box"}}>
           <span style={{fontSize:11,fontWeight:700,color:"#15803d",whiteSpace:"nowrap"}}>➕ ADD NEW BUNK:</span>
           <input value={newBunkInput} onChange={e=>setNewBunkInput(e.target.value.toUpperCase())}
             placeholder="TYPE NEW BUNK NAME..."
             onKeyDown={e=>e.key==="Enter"&&addBunk()}
-            style={{flex:1,padding:"5px 8px",border:"1.5px solid #86efac",borderRadius:6,fontSize:12,outline:"none",background:"#fff",fontFamily:"Inter,sans-serif",textTransform:"uppercase",fontWeight:700,color:"#15803d"}}/>
-          <button onClick={addBunk} style={{padding:"5px 12px",borderRadius:6,border:"none",background:"#22c55e",color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer",whiteSpace:"nowrap"}}>+ ADD</button>
+            style={{flex:1,padding:"5px 8px",border:"1.5px solid #86efac",borderRadius:6,fontSize:12,outline:"none",background:"#fff",fontFamily:"Inter,sans-serif",textTransform:"uppercase",fontWeight:700,color:"#15803d",minWidth:0}}/>
+          <button onClick={addBunk} style={{padding:"5px 12px",borderRadius:6,border:"none",background:"#22c55e",color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>+ ADD</button>
         </div>
         <input placeholder="🔍 SEARCH BUNK..." value={search} onChange={e=>setSearch(e.target.value.toUpperCase())}
-          style={{padding:"8px 12px",border:"2px solid #c7d2fe",borderRadius:8,fontSize:12,outline:"none",marginBottom:10,fontFamily:"Inter,sans-serif",textTransform:"uppercase"}}/>
-        <div style={{overflowY:"auto",flex:1,maxHeight:"45vh",paddingRight:4}}>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+          style={{padding:"8px 12px",border:"2px solid #c7d2fe",borderRadius:8,fontSize:12,outline:"none",marginBottom:10,fontFamily:"Inter,sans-serif",textTransform:"uppercase",boxSizing:"border-box",width:"100%"}}/>
+        <div style={{overflowY:"auto",flex:1,maxHeight:"45vh",paddingRight:2,boxSizing:"border-box"}}>
+          {/* Single column on narrow screens, 2 columns when wide enough */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:6}}>
             {filtered.map(({n,i})=>(
-              <div key={i} style={{display:"flex",alignItems:"center",gap:6,background:"#f8f9ff",borderRadius:8,border:"1.5px solid #e0e7ff",padding:"6px 10px"}}>
-                <span style={{fontSize:10,color:"#9ca3af",fontWeight:700,minWidth:50,flexShrink:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={DEFAULT_BUNK_NAMES[i]||"SLOT "+(i+1)}>
+              <div key={i} style={{display:"flex",alignItems:"center",gap:5,background:"#f8f9ff",borderRadius:8,border:"1.5px solid #e0e7ff",padding:"6px 8px",boxSizing:"border-box",minWidth:0}}>
+                <span style={{fontSize:10,color:"#9ca3af",fontWeight:700,width:52,flexShrink:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={DEFAULT_BUNK_NAMES[i]||"SLOT "+(i+1)}>
                   {DEFAULT_BUNK_NAMES[i]||"SLOT "+(i+1)}
                 </span>
                 <span style={{color:"#c7d2fe",fontSize:12,flexShrink:0}}>→</span>
@@ -596,16 +609,16 @@ function BunkSettingsModal({onClose,onSave,currentBunkNames}){
                   value={n}
                   onChange={e=>{const upd=[...names];upd[i]=e.target.value.toUpperCase();setNames(upd);}}
                   placeholder={DEFAULT_BUNK_NAMES[i]||"BUNK "+(i+1)}
-                  style={{flex:1,padding:"4px 7px",border:"1.5px solid #c7d2fe",borderRadius:6,fontSize:12,outline:"none",background:"#fff",fontFamily:"Inter,sans-serif",textTransform:"uppercase",fontWeight:700,color:"#3730a3",minWidth:0}}
+                  style={{flex:1,padding:"4px 6px",border:"1.5px solid #c7d2fe",borderRadius:6,fontSize:12,outline:"none",background:"#fff",fontFamily:"Inter,sans-serif",textTransform:"uppercase",fontWeight:700,color:"#3730a3",minWidth:0,boxSizing:"border-box"}}
                 />
                 <button onClick={()=>removeBunk(i)} title={"Remove "+n}
-                  style={{background:"none",border:"1.5px solid #fca5a5",borderRadius:5,color:"#ef4444",cursor:"pointer",fontSize:11,padding:"1px 5px",flexShrink:0,fontWeight:700}}>✕</button>
+                  style={{background:"#fff0f0",border:"1.5px solid #fca5a5",borderRadius:5,color:"#ef4444",cursor:"pointer",fontSize:12,padding:"2px 7px",flexShrink:0,fontWeight:700,lineHeight:"16px"}}>✕</button>
               </div>
             ))}
           </div>
           {filtered.length===0&&<div style={{textAlign:"center",padding:24,color:"#9ca3af",fontSize:12}}>NO BUNKS MATCH SEARCH</div>}
         </div>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:16,paddingTop:12,borderTop:"2px solid #e0e7ff",gap:8,flexWrap:"wrap"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:14,paddingTop:12,borderTop:"2px solid #e0e7ff",gap:8,flexWrap:"wrap"}}>
           <button onClick={reset} style={{padding:"8px 14px",borderRadius:8,border:"2px solid #f59e0b",background:"#fffbeb",color:"#92400e",fontWeight:700,fontSize:12,cursor:"pointer"}}>🔄 RESET TO DEFAULT</button>
           <div style={{display:"flex",gap:8}}>
             <button onClick={onClose} style={{padding:"8px 14px",borderRadius:8,border:"2px solid #6b7280",background:"transparent",color:"#6b7280",fontWeight:700,fontSize:12,cursor:"pointer"}}>CANCEL</button>
