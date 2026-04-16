@@ -75,10 +75,14 @@ const COLS=[
 ];
 const NUM_COLS=COLS.filter(c=>c.type==="number").map(c=>c.key);
 const STORAGE_KEY="trainee_cms_v4";
+const BUNK_NAMES_KEY="trainee_cms_bunk_names_v4";
 const EMPTY=()=>Object.fromEntries(COLS.map(c=>[c.key,""]));
 const mkInv=(name,id)=>({id,name,records:[],closedAt:null,createdAt:new Date().toLocaleString()});
 const loadState=()=>{try{const r=localStorage.getItem(STORAGE_KEY);return r?JSON.parse(r):null;}catch{return null;}};
 const saveState=(invs,activeId)=>{try{localStorage.setItem(STORAGE_KEY,JSON.stringify({invs,activeId}));}catch{}};
+// Load bunk names from localStorage (fast, no network needed)
+const loadBunkNamesFromLocal=()=>{try{const r=localStorage.getItem(BUNK_NAMES_KEY);if(r){const arr=JSON.parse(r);if(arr&&arr.length>0){BUNK_NAMES.splice(0,BUNK_NAMES.length,...arr);return arr;}}return null;}catch{return null;}};
+const saveBunkNamesToLocal=(names)=>{try{localStorage.setItem(BUNK_NAMES_KEY,JSON.stringify(names));}catch{}};
 let _uid=Date.now();
 const uid=()=>String(++_uid);
 
@@ -108,17 +112,23 @@ const scriptCall=async(payload)=>{
 };
 
 const saveBunkNamesToSheet=async(names)=>{
+  saveBunkNamesToLocal(names); // Always save locally first (instant, no network)
   try{await scriptCall({action:"saveBunkNames",names});return true;}catch(e){return false;}
 };
 const loadBunkNamesFromSheet=async()=>{
+  // First load from localStorage (instant)
+  loadBunkNamesFromLocal();
+  // Then try to sync from Google Sheet (may override local)
   try{
     const json=await scriptCall({action:"getBunkNames"});
     if(json.ok&&json.names&&json.names.length>0){
       BUNK_NAMES.splice(0,BUNK_NAMES.length,...json.names);
+      saveBunkNamesToLocal(json.names); // Keep local in sync
       return json.names;
     }
   }catch(e){}
-  return null;
+  // Return whatever is in BUNK_NAMES (may be from local or default)
+  return BUNK_NAMES.length>0?[...BUNK_NAMES]:null;
 };
 
 const toCSV=(recs)=>{
@@ -177,7 +187,8 @@ const parseUploadedFile=(file)=>new Promise((resolve,reject)=>{
 });
 
 // ── Bunk Name Dropdown with Search ────────────────────────────
-function BunkNameDropdown({value,onChange}){
+function BunkNameDropdown({value,onChange,bunkNames}){
+  const names=bunkNames||BUNK_NAMES;
   const [open,setOpen]=useState(false);
   const [search,setSearch]=useState("");
   const wrapRef=useRef();
@@ -196,10 +207,10 @@ function BunkNameDropdown({value,onChange}){
   },[]);
 
   const filtered=useMemo(()=>{
-    if(!search)return BUNK_NAMES;
+    if(!search)return names;
     const q=search.toLowerCase();
-    return BUNK_NAMES.filter(b=>b.toLowerCase().includes(q));
-  },[search]);
+    return names.filter(b=>b.toLowerCase().includes(q));
+  },[search,names]);
 
   const select=(name)=>{
     onChange(name);
@@ -240,7 +251,8 @@ function BunkNameDropdown({value,onChange}){
 }
 
 // ── Inline Bunk Name Dropdown for table ───────────────────────
-function InlineBunkDropdown({value,onSave}){
+function InlineBunkDropdown({value,onSave,bunkNames}){
+  const names=bunkNames||BUNK_NAMES;
   const [editing,setEditing]=useState(false);
   const [val,setVal]=useState(value||"");
   const [search,setSearch]=useState("");
@@ -255,10 +267,10 @@ function InlineBunkDropdown({value,onSave}){
   },[]);
 
   const filtered=useMemo(()=>{
-    if(!search)return BUNK_NAMES;
+    if(!search)return names;
     const q=search.toLowerCase();
-    return BUNK_NAMES.filter(b=>b.toLowerCase().includes(q));
-  },[search]);
+    return names.filter(b=>b.toLowerCase().includes(q));
+  },[search,names]);
 
   const select=(name)=>{setVal(name);onSave("bunkName",name);setEditing(false);setSearch("");};
 
@@ -290,14 +302,14 @@ function InlineBunkDropdown({value,onSave}){
 }
 
 // ── Inline Cell Editor ─────────────────────────────────────────
-function InlineCell({rec,col,onSave}){
+function InlineCell({rec,col,onSave,bunkNames}){
   const [editing,setEditing]=useState(false);
   const [val,setVal]=useState(rec[col.key]||"");
   const inRef=useRef();
 
   // Bunk Name uses its own dropdown component
   if(col.key==="bunkName"){
-    return <InlineBunkDropdown value={rec.bunkName} onSave={onSave}/>;
+    return <InlineBunkDropdown value={rec.bunkName} onSave={onSave} bunkNames={bunkNames}/>;
   }
 
   useEffect(()=>{if(editing&&inRef.current)inRef.current.focus();},[editing]);
@@ -499,16 +511,17 @@ function SaveBunkBtn({names,onSave,onClose}){
   const [err,setErr]=useState(null);
   const doSave=async()=>{
     setSaving(true);setErr(null);
-    const cleaned=names.map((n,i)=>n.trim()||DEFAULT_BUNK_NAMES[i]);
-    const ok=await saveBunkNamesToSheet(cleaned);
-    if(ok){
-      BUNK_NAMES.splice(0,BUNK_NAMES.length,...cleaned);
-      onSave(cleaned);
-      onClose();
-    }else{
-      setErr("SAVE FAILED - CHECK NETWORK");
-      setSaving(false);
-    }
+    // FIX: for custom-added bunks beyond DEFAULT_BUNK_NAMES, use the name itself as fallback
+    const cleaned=names.map((n,i)=>n.trim()||(DEFAULT_BUNK_NAMES[i]||"BUNK "+(i+1)));
+    // Save to localStorage immediately (always works, no network)
+    saveBunkNamesToLocal(cleaned);
+    BUNK_NAMES.splice(0,BUNK_NAMES.length,...cleaned);
+    onSave(cleaned); // Update React state in App immediately
+    onClose();       // Close modal immediately — don't wait for network
+    // Try sheet sync in background (non-blocking)
+    saveBunkNamesToSheet(cleaned).then(ok=>{
+      if(!ok)console.warn("Sheet sync failed — names saved locally");
+    });
   };
   return(
     <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
@@ -524,35 +537,73 @@ function SaveBunkBtn({names,onSave,onClose}){
 function BunkSettingsModal({onClose,onSave}){
   const [names,setNames]=useState([...BUNK_NAMES]);
   const [search,setSearch]=useState("");
-  const filtered=search?names.map((n,i)=>({n,i})).filter(({n,i})=>n.toLowerCase().includes(search.toLowerCase())||DEFAULT_BUNK_NAMES[i].toLowerCase().includes(search.toLowerCase())):names.map((n,i)=>({n,i}));
-  const reset=()=>{if(window.confirm("RESET ALL TO DEFAULT? (BUNK 01, BUNK 02...)")){setNames([...DEFAULT_BUNK_NAMES]);}}
+  const [newBunkInput,setNewBunkInput]=useState("");
+
+  // FIX BUG 3: search only filters DISPLAY — save always uses full `names` array (not filtered!)
+  const filtered=search
+    ?names.map((n,i)=>({n,i})).filter(({n,i})=>
+        n.toLowerCase().includes(search.toLowerCase())||
+        (DEFAULT_BUNK_NAMES[i]||"SLOT "+(i+1)).toLowerCase().includes(search.toLowerCase()))
+    :names.map((n,i)=>({n,i}));
+
+  const reset=()=>{if(window.confirm("RESET ALL TO DEFAULT? (BUNK 01, BUNK 02...)"))setNames([...DEFAULT_BUNK_NAMES]);};
+
+  // FIX BUG 2: Add new bunk
+  const addBunk=()=>{
+    const val=newBunkInput.trim().toUpperCase();
+    if(!val){alert("ENTER A BUNK NAME FIRST");return;}
+    if(names.some(n=>n.toUpperCase()===val)){alert('"'+val+'" ALREADY EXISTS');return;}
+    setNames(prev=>[...prev,val]);
+    setNewBunkInput("");
+  };
+
+  // FIX BUG 2: Remove bunk at index
+  const removeBunk=(idx)=>{
+    if(names.length<=1){alert("CANNOT REMOVE ALL BUNKS");return;}
+    if(!window.confirm('REMOVE "'+names[idx]+'"?'))return;
+    setNames(prev=>prev.filter((_,i)=>i!==idx));
+  };
+
   return(
     <div style={{position:"fixed",inset:0,background:"rgba(30,27,75,0.65)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:2000,padding:16}}>
-      <div style={{background:"#fff",borderRadius:16,border:"2px solid #6366f1",padding:24,width:"95%",maxWidth:600,maxHeight:"92vh",display:"flex",flexDirection:"column",gap:0}}>
+      <div style={{background:"#fff",borderRadius:16,border:"2px solid #6366f1",padding:24,width:"95%",maxWidth:640,maxHeight:"92vh",display:"flex",flexDirection:"column",gap:0}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,paddingBottom:12,borderBottom:"2px solid #e0e7ff"}}>
-          <div style={{fontSize:16,fontWeight:800,color:"#3730a3"}}>⚙ CUSTOMIZE BUNK NAMES</div>
+          <div style={{fontSize:16,fontWeight:800,color:"#3730a3"}}>⚙ CUSTOMIZE BUNK NAMES ({names.length} BUNKS)</div>
           <button onClick={onClose} style={{background:"none",border:"2px solid #e2e8f0",borderRadius:6,fontSize:16,cursor:"pointer",color:"#6b7280",width:32,height:32}}>✕</button>
         </div>
         <div style={{background:"#eff6ff",border:"1.5px solid #93c5fd",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:11,color:"#1e40af",fontWeight:700}}>
           💡 TYPE CUSTOM NAME FOR EACH BUNK — CHANGES APPLY TO ALL CMS. LEFT = DEFAULT SLOT, RIGHT = YOUR CUSTOM NAME.
         </div>
+        <div style={{display:"flex",gap:6,marginBottom:10,alignItems:"center",background:"#f0fdf4",border:"1.5px solid #86efac",borderRadius:8,padding:"8px 10px"}}>
+          <span style={{fontSize:11,fontWeight:700,color:"#15803d",whiteSpace:"nowrap"}}>➕ ADD NEW BUNK:</span>
+          <input value={newBunkInput} onChange={e=>setNewBunkInput(e.target.value.toUpperCase())}
+            placeholder="TYPE NEW BUNK NAME..."
+            onKeyDown={e=>e.key==="Enter"&&addBunk()}
+            style={{flex:1,padding:"5px 8px",border:"1.5px solid #86efac",borderRadius:6,fontSize:12,outline:"none",background:"#fff",fontFamily:"Inter,sans-serif",textTransform:"uppercase",fontWeight:700,color:"#15803d"}}/>
+          <button onClick={addBunk} style={{padding:"5px 12px",borderRadius:6,border:"none",background:"#22c55e",color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer",whiteSpace:"nowrap"}}>+ ADD</button>
+        </div>
         <input placeholder="🔍 SEARCH BUNK..." value={search} onChange={e=>setSearch(e.target.value.toUpperCase())}
           style={{padding:"8px 12px",border:"2px solid #c7d2fe",borderRadius:8,fontSize:12,outline:"none",marginBottom:10,fontFamily:"Inter,sans-serif",textTransform:"uppercase"}}/>
-        <div style={{overflowY:"auto",flex:1,maxHeight:"52vh",paddingRight:4}}>
+        <div style={{overflowY:"auto",flex:1,maxHeight:"45vh",paddingRight:4}}>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
             {filtered.map(({n,i})=>(
               <div key={i} style={{display:"flex",alignItems:"center",gap:6,background:"#f8f9ff",borderRadius:8,border:"1.5px solid #e0e7ff",padding:"6px 10px"}}>
-                <span style={{fontSize:10,color:"#9ca3af",fontWeight:700,minWidth:52,flexShrink:0}}>{DEFAULT_BUNK_NAMES[i]}</span>
+                <span style={{fontSize:10,color:"#9ca3af",fontWeight:700,minWidth:50,flexShrink:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={DEFAULT_BUNK_NAMES[i]||"SLOT "+(i+1)}>
+                  {DEFAULT_BUNK_NAMES[i]||"SLOT "+(i+1)}
+                </span>
                 <span style={{color:"#c7d2fe",fontSize:12,flexShrink:0}}>→</span>
                 <input
                   value={n}
                   onChange={e=>{const upd=[...names];upd[i]=e.target.value.toUpperCase();setNames(upd);}}
-                  placeholder={DEFAULT_BUNK_NAMES[i]}
+                  placeholder={DEFAULT_BUNK_NAMES[i]||"BUNK "+(i+1)}
                   style={{flex:1,padding:"4px 7px",border:"1.5px solid #c7d2fe",borderRadius:6,fontSize:12,outline:"none",background:"#fff",fontFamily:"Inter,sans-serif",textTransform:"uppercase",fontWeight:700,color:"#3730a3",minWidth:0}}
                 />
+                <button onClick={()=>removeBunk(i)} title={"Remove "+n}
+                  style={{background:"none",border:"1.5px solid #fca5a5",borderRadius:5,color:"#ef4444",cursor:"pointer",fontSize:11,padding:"1px 5px",flexShrink:0,fontWeight:700}}>✕</button>
               </div>
             ))}
           </div>
+          {filtered.length===0&&<div style={{textAlign:"center",padding:24,color:"#9ca3af",fontSize:12}}>NO BUNKS MATCH SEARCH</div>}
         </div>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:16,paddingTop:12,borderTop:"2px solid #e0e7ff",gap:8,flexWrap:"wrap"}}>
           <button onClick={reset} style={{padding:"8px 14px",borderRadius:8,border:"2px solid #f59e0b",background:"#fffbeb",color:"#92400e",fontWeight:700,fontSize:12,cursor:"pointer"}}>🔄 RESET TO DEFAULT</button>
@@ -597,18 +648,25 @@ function App(){
   const [showUpload,setShowUpload]=useState(false);
   const [showPendingBunks,setShowPendingBunks]=useState(false);
   const [showBunkSettings,setShowBunkSettings]=useState(false);
-  const [bunkNamesVer,setBunkNamesVer]=useState(0);
+  // FIX BUG 1: Store bunk names in React state so all dropdowns re-render correctly
+  const [bunkNames,setBunkNames]=useState(()=>{
+    // Load from localStorage immediately (synchronous, no flash)
+    const local=loadBunkNamesFromLocal();
+    return local?[...BUNK_NAMES]:[...DEFAULT_BUNK_NAMES];
+  });
   const [bunkLoading,setBunkLoading]=useState(false);
 
   const tRef=useRef();const undoRef=useRef();
   useEffect(()=>{saveState(invs,activeId);},[invs,activeId]);
   useEffect(()=>()=>{clearTimeout(tRef.current);clearTimeout(undoRef.current);},[]);
 
-  // Load bunk names from Google Sheet on startup
+  // Also try to sync from Google Sheet in background (updates state if sheet has newer names)
   useEffect(()=>{
     setBunkLoading(true);
     loadBunkNamesFromSheet().then(names=>{
-      if(names)setBunkNamesVer(v=>v+1);
+      if(names&&names.length>0){
+        setBunkNames([...names]);
+      }
       setBunkLoading(false);
     });
   },[]);
@@ -882,8 +940,8 @@ function App(){
 
   const pendingBunks=useMemo(()=>{
     const usedBunks=new Set(records.map(r=>(r.bunkName||"").trim().toUpperCase()).filter(Boolean));
-    return BUNK_NAMES.filter(b=>!usedBunks.has(b.toUpperCase()));
-  },[records]);
+    return bunkNames.filter(b=>!usedBunks.has(b.toUpperCase()));
+  },[records,bunkNames]);
 
   const isDateFiltered=!!(dateFrom||dateTo);
   const btn=(bg,color,outline)=>({padding:"8px 14px",borderRadius:8,border:`2px solid ${outline?"#6b7280":bg}`,background:outline?"transparent":bg,color:outline?"#6b7280":color,fontWeight:700,fontSize:12,cursor:"pointer"});
@@ -1003,7 +1061,7 @@ function App(){
         {stats.withRemark>0&&<><span>|</span><span style={{color:"#7c3aed"}}>💬 {stats.withRemark} WITH REMARK</span></>}
         {selected.size>0&&<><span>|</span><span style={{color:"#ef4444"}}>☑ {selected.size} SELECTED</span></>}
         {!isHist&&<><span>|</span>
-        <span>🏦 {BUNK_NAMES.length-pendingBunks.length} BUNKS USED</span><span>|</span>
+        <span>🏦 {bunkNames.length-pendingBunks.length} BUNKS USED</span><span>|</span>
         <span onClick={()=>setShowPendingBunks(true)} style={{color:pendingBunks.length>0?"#ef4444":"#10b981",cursor:pendingBunks.length>0?"pointer":"default",textDecoration:pendingBunks.length>0?"underline":"none",display:"flex",alignItems:"center",gap:4}}>
           ⏳ {pendingBunks.length} BUNKS PENDING{pendingBunks.length>0?" 👆":""}
         </span></>}
@@ -1037,7 +1095,7 @@ function App(){
                     fontStyle:c.key==="remark"?"italic":"normal",
                     padding:!isHist?"4px 8px":TD.padding}}>
                     {!isHist
-                      ?<InlineCell rec={r} col={c} onSave={(key,val)=>inlineSave(r.id,key,val)}/>
+                      ?<InlineCell rec={r} col={c} onSave={(key,val)=>inlineSave(r.id,key,val)} bunkNames={bunkNames}/>
                       :(c.type==="number"&&r[c.key]&&!isNaN(parseFloat(r[c.key]))?`₹${parseFloat(r[c.key]).toLocaleString()}`:c.type==="date"?(r[c.key]?(r[c.key].split("T")[0].split("-").reverse().join("-")):"—"):(r[c.key]||"—"))
                     }
                   </td>
@@ -1084,12 +1142,12 @@ function App(){
                   {["bunkName","traineeName"].includes(c.key)&&<span style={{color:"#ef4444"}}> *</span>}
                   {c.key==="serviceCharge"&&<span style={{color:"#15803d"}}> ✦ AUTO</span>}
                   {c.key==="remark"&&<span style={{color:"#7c3aed"}}> 💬</span>}
-                  {c.key==="bunkName"&&<span style={{color:"#6366f1"}}> 🏦 ({BUNK_NAMES.length} OPTIONS)</span>}
+                  {c.key==="bunkName"&&<span style={{color:"#6366f1"}}> 🏦 ({bunkNames.length} OPTIONS)</span>}
                 </label>
 
                 {/* ── BUNK NAME uses searchable dropdown ── */}
                 {c.key==="bunkName"?(
-                  <BunkNameDropdown value={form.bunkName} onChange={v=>setForm(f=>({...f,bunkName:v}))}/>
+                  <BunkNameDropdown value={form.bunkName} onChange={v=>setForm(f=>({...f,bunkName:v}))} bunkNames={bunkNames}/>
                 ):c.key==="remark"?(
                   <textarea value={form[c.key]} onChange={e=>setForm(f=>({...f,[c.key]:e.target.value.toUpperCase()}))}
                     placeholder="ENTER ANY REMARKS OR NOTES..."
@@ -1117,7 +1175,7 @@ function App(){
 
       {showUpload&&<FileUploadModal onClose={()=>setShowUpload(false)} onImport={handleFileImport}/>}
 
-      {showBunkSettings&&<BunkSettingsModal onClose={()=>setShowBunkSettings(false)} onSave={(names)=>{setBunkNamesVer(v=>v+1);showToast("Bunk names saved!");}}/>}
+      {showBunkSettings&&<BunkSettingsModal onClose={()=>setShowBunkSettings(false)} onSave={(names)=>{setBunkNames([...names]);showToast("Bunk names saved!");}}/>}
 
       {/* PENDING BUNKS MODAL */}
       {showPendingBunks&&<div style={{position:"fixed",inset:0,background:"rgba(30,27,75,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:16}}>
@@ -1130,7 +1188,7 @@ function App(){
             💡 TAP ANY BUNK NAME TO OPEN ADD RECORD FORM WITH THAT BUNK PRE-FILLED
           </div>
           {pendingBunks.length===0?(
-            <div style={{textAlign:"center",padding:28,color:"#10b981",fontWeight:800,fontSize:14}}>🎉 ALL {BUNK_NAMES.length} BUNKS ARE ADDED!</div>
+            <div style={{textAlign:"center",padding:28,color:"#10b981",fontWeight:800,fontSize:14}}>🎉 ALL {bunkNames.length} BUNKS ARE ADDED!</div>
           ):(
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(130px,1fr))",gap:8}}>
               {pendingBunks.map(b=>(
@@ -1149,7 +1207,7 @@ function App(){
           )}
           <div style={{marginTop:16,paddingTop:12,borderTop:"1.5px solid #fee2e2",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
             <div style={{fontSize:11,color:"#9ca3af",fontWeight:700}}>
-              ✅ {BUNK_NAMES.length - pendingBunks.length} / {BUNK_NAMES.length} BUNKS COMPLETED
+              ✅ {bunkNames.length - pendingBunks.length} / {bunkNames.length} BUNKS COMPLETED
             </div>
             <button onClick={()=>setShowPendingBunks(false)} style={{padding:"7px 16px",borderRadius:8,border:"2px solid #6b7280",background:"transparent",color:"#6b7280",fontWeight:700,fontSize:12,cursor:"pointer"}}>CLOSE</button>
           </div>
