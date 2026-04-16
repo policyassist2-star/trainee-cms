@@ -307,12 +307,13 @@ function InlineCell({rec,col,onSave,bunkNames}){
   const [val,setVal]=useState(rec[col.key]||"");
   const inRef=useRef();
 
+  // FIX: useEffect MUST come before any early return (React Rules of Hooks)
+  useEffect(()=>{if(editing&&inRef.current)inRef.current.focus();},[editing]);
+
   // Bunk Name uses its own dropdown component
   if(col.key==="bunkName"){
     return <InlineBunkDropdown value={rec.bunkName} onSave={onSave} bunkNames={bunkNames}/>;
   }
-
-  useEffect(()=>{if(editing&&inRef.current)inRef.current.focus();},[editing]);
   const commit=()=>{
     onSave(col.key,col.type==="number"||col.type==="date"?val:val.toUpperCase());
     if(col.key==="policyCount"){
@@ -513,15 +514,13 @@ function SaveBunkBtn({names,onSave,onClose}){
     setSaving(true);setErr(null);
     // FIX: for custom-added bunks beyond DEFAULT_BUNK_NAMES, use the name itself as fallback
     const cleaned=names.map((n,i)=>n.trim()||(DEFAULT_BUNK_NAMES[i]||"BUNK "+(i+1)));
-    // Save to localStorage immediately (always works, no network)
-    saveBunkNamesToLocal(cleaned);
+    // Update global mirror and React state immediately
     BUNK_NAMES.splice(0,BUNK_NAMES.length,...cleaned);
+    saveBunkNamesToLocal(cleaned); // localStorage save (instant)
     onSave(cleaned); // Update React state in App immediately
     onClose();       // Close modal immediately — don't wait for network
-    // Try sheet sync in background (non-blocking)
-    saveBunkNamesToSheet(cleaned).then(ok=>{
-      if(!ok)console.warn("Sheet sync failed — names saved locally");
-    });
+    // Try sheet sync in background (non-blocking) — saveBunkNamesToSheet also saves locally but that's fine
+    scriptCall({action:"saveBunkNames",names:cleaned}).catch(()=>console.warn("Sheet sync failed — names saved locally"));
   };
   return(
     <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
@@ -534,8 +533,9 @@ function SaveBunkBtn({names,onSave,onClose}){
 }
 
 // ── Bunk Name Settings Modal ──────────────────────────────────
-function BunkSettingsModal({onClose,onSave}){
-  const [names,setNames]=useState([...BUNK_NAMES]);
+function BunkSettingsModal({onClose,onSave,currentBunkNames}){
+  // FIX: use currentBunkNames prop (React state from App) not BUNK_NAMES global
+  const [names,setNames]=useState([...(currentBunkNames||BUNK_NAMES)]);
   const [search,setSearch]=useState("");
   const [newBunkInput,setNewBunkInput]=useState("");
 
@@ -625,7 +625,7 @@ function App(){
   const [search,setSearch]=useState("");
   const [histSearch,setHistSearch]=useState("");
   const [editId,setEditId]=useState(null);
-  const [form,setForm]=useState(EMPTY);
+  const [form,setForm]=useState(()=>EMPTY());
   const [showForm,setShowForm]=useState(false);
   const [delId,setDelId]=useState(null);
   const [toast,setToast]=useState(null);
@@ -912,7 +912,6 @@ function App(){
   };
 
   const toggleSelect=(id)=>setSelected(s=>{const n=new Set(s);n.has(id)?n.delete(id):n.add(id);return n;});
-  const displayIds=useMemo(()=>new Set(display.map(r=>r.id)),[display]);
   const allDisplaySelected=display.length>0&&display.every(r=>selected.has(r.id));
   const selectAll=()=>setSelected(()=>allDisplaySelected?new Set():new Set(display.map(r=>r.id)));
 
@@ -1175,7 +1174,7 @@ function App(){
 
       {showUpload&&<FileUploadModal onClose={()=>setShowUpload(false)} onImport={handleFileImport}/>}
 
-      {showBunkSettings&&<BunkSettingsModal onClose={()=>setShowBunkSettings(false)} onSave={(names)=>{setBunkNames([...names]);showToast("Bunk names saved!");}}/>}
+      {showBunkSettings&&<BunkSettingsModal onClose={()=>setShowBunkSettings(false)} onSave={(names)=>{setBunkNames([...names]);showToast("Bunk names saved!");}} currentBunkNames={bunkNames}/>}
 
       {/* PENDING BUNKS MODAL */}
       {showPendingBunks&&<div style={{position:"fixed",inset:0,background:"rgba(30,27,75,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:16}}>
