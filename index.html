@@ -34,7 +34,7 @@ input,button,select{text-transform:uppercase;}
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const {useState,useRef,useEffect,useMemo,useCallback}=React;
+const {useState,useRef,useEffect,useMemo}=React;
 
 const SCRIPT_URL="https://script.google.com/macros/s/AKfycbyLkU-oaFpujlL9WyMosChY8AWfv58yrkjo2FYo9VSLUbXvwiNTRFxr3eFe0cB1dnfEPw/exec";
 const SERVICE_CHARGE_RATE=165;
@@ -672,6 +672,24 @@ function App(){
   const tRef=useRef();const undoRef=useRef();
   useEffect(()=>{saveState(invs,activeId);},[invs,activeId]);
   useEffect(()=>()=>{clearTimeout(tRef.current);clearTimeout(undoRef.current);},[]);
+
+  // Global Escape key → close topmost open modal
+  useEffect(()=>{
+    const handler=(e)=>{
+      if(e.key!=="Escape")return;
+      if(showBunkSettings){setShowBunkSettings(false);return;}
+      if(showUpload){setShowUpload(false);return;}
+      if(showPendingBunks){setShowPendingBunks(false);return;}
+      if(showForm){setShowForm(false);setEditId(null);setForm(EMPTY());return;}
+      if(showBulkDel){setShowBulkDel(false);return;}
+      if(delId){setDelId(null);return;}
+      if(showClose){setShowClose(false);return;}
+      if(showNew){setShowNew(false);setNewName("");return;}
+      if(renameId){setRenameId(null);return;}
+    };
+    document.addEventListener("keydown",handler);
+    return()=>document.removeEventListener("keydown",handler);
+  },[showBunkSettings,showUpload,showPendingBunks,showForm,showBulkDel,delId,showClose,showNew,renameId]);
 
   // Also try to sync from Google Sheet in background (updates state if sheet has newer names)
   useEffect(()=>{
